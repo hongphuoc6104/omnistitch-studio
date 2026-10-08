@@ -50,6 +50,20 @@ def compute_local_sharpness_map(img_rgb, kernel_size=15):
     return sharpness_norm
 
 
+def compute_tile_global_sharpness(img_rgb):
+    """
+    Tính phương sai Laplacian của tile ảnh để đo mức độ in-focus tổng thể.
+    Tile nét có giá trị cao (150-300+), tile mờ out-of-focus có giá trị thấp (<60).
+    """
+    if img_rgb is None or img_rgb.size == 0:
+        return 1.0
+    if img_rgb.ndim == 3:
+        gray = cv2.cvtColor(img_rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_rgb
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    return float(np.var(lap))
+
 
 def enhance_cellular_clarity(image, strength=0.35):
     """
@@ -908,14 +922,106 @@ def compensate_overlap_exposure(source_images, transforms, motion_model='affine'
 
 def blend_multiband_voronoi(images, tile_gains, adjusted_transforms, canvas_w, canvas_h, num_bands=5, background_mode='white'):
     """
-    Hòa trộn multiband Voronoi (Wrapper tương thích ngược sử dụng FastStreamingBlender).
+    Hòa trộn đa băng tần Laplacian kết hợp phân vùng Voronoi Seam Partitioning.
+    Cơ chế Sharpness-Dominant Selection:
+    - Tại mọi vùng chồng lấn, tile có độ nét cao hơn (in-focus) sẽ chiến thắng áp đảo tile mờ (out-of-focus).
+    - Tần số cao nhất (High-band - chi tiết tế bào) lấy 100% từ tile rõ nét nhất, loại bỏ hoàn toàn phần mờ nhòe.
+    - Tần số thấp (Low-band - trường sáng nền) hòa trộn mượt qua tháp Laplacian 5 tầng, xóa sạch đường nối thẳng đứng.
     """
-    blender = FastStreamingBlender(canvas_w, canvas_h, background_mode=background_mode)
-    indices = sorted([i for i in images if i in adjusted_transforms and images[i] is not None])
-    for idx in indices:
-        blender.blend_tile(images[idx], adjusted_transforms[idx], idx)
-    result = blender.finalize()
-    if isinstance(result, tuple) and len(result) >= 2:
-        return result[0], result[-1]
-    return result
+    indices = [i for i in images if i in adjusted_transforms and images[i] is not None]
+    n_images = len(indices)
+    if n_images == 0:
+        bg_col = 255 if background_mode == 'white' else 0
+        return np.full((canvas_h, canvas_w, 3), bg_col, dtype=np.uint8), np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+
+    # 1. Cân bằng phơi sáng an toàn
+    compensated_images = {}
+    for i in indices:
+        img = images[i]
+        rgb = img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
+        g = tile_gains.get(i, np.ones(3, dtype=np.float32))
+        img_f = rgb.astype(np.float32) * g[None, None, :]
+        compensated_images[i] = np.clip(img_f, 0.0, 255.0).astype(np.uint8)
+
+    # 2. Tạo mặt nạ Voronoi Seam Partitioning với Sharpness Dominance
+    tile_global_sharpness = {}
+    for i in indices:
+        tile_global_sharpness[i] = compute_tile_global_sharpness(compensated_images[i])
+
+    med_sharpness = float(np.median(list(tile_global_sharpness.values()))) if tile_global_sharpness else 1.0
+    med_sharpness = max(1.0, med_sharpness)
+
+    max_dist = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+    best_tile_idx = np.full((canvas_h, canvas_w), -1, dtype=np.int16)
+    tile_rois = {}
+
+    for i in indices:
+        h, w = images[i].shape[:2]
+        H = np.asarray(adjusted_transforms[i], dtype=np.float64)
+
+        padded_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        padded_mask[1:-1, 1:-1] = 1
+        dist_map = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)[1:-1, 1:-1].astype(np.float32)
+
+        corners = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], dtype=np.float64).T
+        warped_corners = H @ corners
+        pts = warped_corners[:2, :].T
+        x0 = max(0, int(np.floor(np.min(pts[:, 0]))))
+        y0 = max(0, int(np.floor(np.min(pts[:, 1]))))
+        x1 = min(canvas_w, int(np.ceil(np.max(pts[:, 0]))))
+        y1 = min(canvas_h, int(np.ceil(np.max(pts[:, 1]))))
+        rw, rh = x1 - x0, y1 - y0
+
+        if rw <= 0 or rh <= 0:
+            continue
+
+        T_roi = np.array([[1.0, 0.0, -x0], [0.0, 1.0, -y0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        H_roi = (T_roi @ H)[:2]
+
+        warped_dist = cv2.warpAffine(dist_map, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+        warped_mask = cv2.warpAffine(np.ones((h, w), dtype=np.uint8), H_roi, (rw, rh), flags=cv2.INTER_NEAREST, borderValue=0)
+
+        sharpness_map = compute_local_sharpness_map(compensated_images[i], kernel_size=15)
+        warped_sharpness = cv2.warpAffine(sharpness_map, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+
+        g_focus = max(0.01, float(tile_global_sharpness[i] / med_sharpness) ** 2.0)
+
+        edge_ramp = np.clip(warped_dist / 15.0, 0.0, 1.0)
+        tile_quality = (edge_ramp * (g_focus * (warped_sharpness ** 2.0) + 0.001 * warped_dist)).astype(np.float32)
+
+        canvas_d_sub = max_dist[y0:y1, x0:x1]
+        canvas_idx_sub = best_tile_idx[y0:y1, x0:x1]
+
+        better = (tile_quality > canvas_d_sub) & (warped_mask > 0)
+        canvas_d_sub[better] = tile_quality[better]
+        canvas_idx_sub[better] = i
+
+        tile_rois[i] = (x0, y0, x1, y1, H_roi)
+
+    # 3. Nạp vào MultiBandBlender của OpenCV
+    actual_bands = max(1, min(num_bands, 8))
+    blender = cv2.detail.MultiBandBlender(0, actual_bands)
+    blender.prepare((0, 0, canvas_w, canvas_h))
+
+    for i in indices:
+        if i not in tile_rois:
+            continue
+        img = compensated_images[i]
+        x0, y0, x1, y1, H_roi = tile_rois[i]
+        rw, rh = x1 - x0, y1 - y0
+
+        warped_img = cv2.warpAffine(img, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        tile_seam_mask = (best_tile_idx[y0:y1, x0:x1] == i).astype(np.uint8) * 255
+        blender.feed(warped_img.astype(np.int16), tile_seam_mask, (x0, y0))
+
+    result_img, result_mask = blender.blend(None, None)
+    final_rgb = np.clip(result_img, 0, 255).astype(np.uint8)
+
+    bg_val = 255 if background_mode == 'white' else 0
+    bg_mask = (result_mask == 0)
+    final_rgb[bg_mask] = bg_val
+
+    global_mask = (result_mask > 0).astype(np.uint8) * 255
+    return final_rgb, global_mask
+
 
