@@ -71,6 +71,9 @@ class TestServerIntegration(unittest.TestCase):
         )
         response = connection.getresponse()
         response.read()
+        self.assertEqual(response.status, 413)
+        connection.close()
+
     def test_dzi_and_image_variant_fallback(self):
         # 1. Tạo DZI folder legacy không suffix trong OUTPUTS_DIR
         legacy_dzi_dir = os.path.join(server.OUTPUTS_DIR, "test_legacy_slide_dzi")

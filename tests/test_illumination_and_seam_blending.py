@@ -71,6 +71,8 @@ class TestIlluminationAndSeamBlending(unittest.TestCase):
         diffs = np.abs(np.diff(row))
         # Không có bước nhảy nào giữa 2 pixel kề nhau vượt quá 3 đơn vị
         max_jump = np.max(diffs)
+        self.assertLessEqual(max_jump, 3.0, f"Bước nhảy pixel quá lớn tại ranh giới: {max_jump}")
+
     def test_gaussian_smoothing_toggle(self):
         # Kiểm tra switch bật/tắt Gaussian smoothing
         tile1 = np.full((120, 120, 3), 190, dtype=np.uint8)
@@ -109,6 +111,8 @@ class TestIlluminationAndSeamBlending(unittest.TestCase):
         # Với unsharp mask vi phân, nhân tế bào sẽ sắc nét và tương phản hơn với nền
         diff_norm = abs(float(res_norm[50, 50, 0]) - float(res_norm[50, 70, 0]))
         diff_clar = abs(float(res_clar[50, 50, 0]) - float(res_clar[50, 70, 0]))
+        self.assertGreaterEqual(diff_clar, diff_norm, "Bộ lọc rõ nét phải tăng hoặc bảo toàn tương phản vi thể nhân tế bào")
+
     def test_compensate_overlap_exposure_balances_brightness(self):
         # Tạo 2 tile chồng lấn 50%: Tile 1 tối (100), Tile 2 sáng (200)
         from backend.blending import compensate_overlap_exposure
@@ -172,6 +176,10 @@ class TestIlluminationAndSeamBlending(unittest.TestCase):
 
         blended, mask = blend_multiband_voronoi(images, gains, transforms, canvas_w=150, canvas_h=100, num_bands=3)
         self.assertEqual(blended.shape, (100, 150, 3))
+        # Không có pixel nào bị lỗi hoặc bùng nổ
+        self.assertAlmostEqual(float(blended[50, 75, 0]), 160.0, delta=2.0)
+        self.assertGreater(np.count_nonzero(mask), 1000)
+
     def test_sharpness_prioritizes_sharp_tile_over_blurry_tile(self):
         from backend.blending import blend_multiband_voronoi
         # Tạo 2 tile chồng lấn 50%:
@@ -255,6 +263,32 @@ class TestIlluminationAndSeamBlending(unittest.TestCase):
         # Điểm ảnh ở tâm tile0: ảnh gốc là 100, ảnh cân màu là 100 * 1.2 = 120
         self.assertEqual(res_goc[50, 50, 0], 100)
         self.assertEqual(res_bal[50, 50, 0], 120)
+
+    def test_blend_multiband_voronoi_homography_and_alpha(self):
+        """Kiểm tra: blend_multiband_voronoi xử lý tốt ma trận homography có perspective và kênh alpha RGBA."""
+        from backend.blending import blend_multiband_voronoi
+        # Tạo 2 tile RGBA
+        tile0 = np.full((100, 100, 4), 200, dtype=np.uint8)
+        tile0[:, :, 3] = 255
+        tile1 = np.full((100, 100, 4), 150, dtype=np.uint8)
+        tile1[:, :, 3] = 255
+        # Viền tile 1 nửa trong suốt
+        tile1[:, :10, 3] = 0
+
+        # Ma trận homography có một chút phối cảnh nhỏ
+        H_homo = np.array([
+            [1.0, 0.02, 50.0],
+            [0.01, 0.98, 5.0],
+            [0.0001, 0.00005, 1.0]
+        ], dtype=np.float64)
+
+        images = {0: tile0, 1: tile1}
+        transforms = {0: np.eye(3, dtype=np.float64), 1: H_homo}
+        gains = {0: np.ones(3, dtype=np.float32), 1: np.ones(3, dtype=np.float32)}
+
+        blended, mask = blend_multiband_voronoi(images, gains, transforms, canvas_w=170, canvas_h=120, num_bands=3)
+        self.assertEqual(blended.shape, (120, 170, 3))
+        self.assertGreater(np.count_nonzero(mask), 5000)
 
 
 if __name__ == '__main__':

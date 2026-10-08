@@ -958,13 +958,22 @@ def blend_multiband_voronoi(images, tile_gains, adjusted_transforms, canvas_w, c
     for i in indices:
         h, w = images[i].shape[:2]
         H = np.asarray(adjusted_transforms[i], dtype=np.float64)
+        is_homo = bool(abs(H[2, 0]) > 1e-7 or abs(H[2, 1]) > 1e-7 or abs(H[2, 2] - 1.0) > 1e-7)
+
+        # Hỗ trợ kênh alpha nếu ảnh là RGBA
+        if images[i].ndim == 3 and images[i].shape[2] == 4:
+            base_mask = (images[i][:, :, 3] > 10).astype(np.uint8)
+        else:
+            base_mask = np.ones((h, w), dtype=np.uint8)
 
         padded_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-        padded_mask[1:-1, 1:-1] = 1
+        padded_mask[1:-1, 1:-1] = base_mask
         dist_map = cv2.distanceTransform(padded_mask, cv2.DIST_L2, 5)[1:-1, 1:-1].astype(np.float32)
 
         corners = np.array([[0, 0, 1], [w, 0, 1], [w, h, 1], [0, h, 1]], dtype=np.float64).T
         warped_corners = H @ corners
+        if is_homo:
+            warped_corners /= (warped_corners[2:3, :] + 1e-8)
         pts = warped_corners[:2, :].T
         x0 = max(0, int(np.floor(np.min(pts[:, 0]))))
         y0 = max(0, int(np.floor(np.min(pts[:, 1]))))
@@ -976,13 +985,19 @@ def blend_multiband_voronoi(images, tile_gains, adjusted_transforms, canvas_w, c
             continue
 
         T_roi = np.array([[1.0, 0.0, -x0], [0.0, 1.0, -y0], [0.0, 0.0, 1.0]], dtype=np.float64)
-        H_roi = (T_roi @ H)[:2]
-
-        warped_dist = cv2.warpAffine(dist_map, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
-        warped_mask = cv2.warpAffine(np.ones((h, w), dtype=np.uint8), H_roi, (rw, rh), flags=cv2.INTER_NEAREST, borderValue=0)
+        H_roi_3x3 = T_roi @ H
 
         sharpness_map = compute_local_sharpness_map(compensated_images[i], kernel_size=15)
-        warped_sharpness = cv2.warpAffine(sharpness_map, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+
+        if is_homo:
+            warped_dist = cv2.warpPerspective(dist_map, H_roi_3x3, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+            warped_mask = cv2.warpPerspective(base_mask, H_roi_3x3, (rw, rh), flags=cv2.INTER_NEAREST, borderValue=0)
+            warped_sharpness = cv2.warpPerspective(sharpness_map, H_roi_3x3, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+        else:
+            H_roi_2x3 = H_roi_3x3[:2]
+            warped_dist = cv2.warpAffine(dist_map, H_roi_2x3, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+            warped_mask = cv2.warpAffine(base_mask, H_roi_2x3, (rw, rh), flags=cv2.INTER_NEAREST, borderValue=0)
+            warped_sharpness = cv2.warpAffine(sharpness_map, H_roi_2x3, (rw, rh), flags=cv2.INTER_LINEAR, borderValue=0.0)
 
         g_focus = max(0.01, float(tile_global_sharpness[i] / med_sharpness) ** 2.0)
 
@@ -996,10 +1011,10 @@ def blend_multiband_voronoi(images, tile_gains, adjusted_transforms, canvas_w, c
         canvas_d_sub[better] = tile_quality[better]
         canvas_idx_sub[better] = i
 
-        tile_rois[i] = (x0, y0, x1, y1, H_roi)
+        tile_rois[i] = (x0, y0, x1, y1, H_roi_3x3, is_homo)
 
     # 3. Nạp vào MultiBandBlender của OpenCV
-    actual_bands = max(1, min(num_bands, 8))
+    actual_bands = max(1, min(int(num_bands), 8))
     blender = cv2.detail.MultiBandBlender(0, actual_bands)
     blender.prepare((0, 0, canvas_w, canvas_h))
 
@@ -1007,14 +1022,22 @@ def blend_multiband_voronoi(images, tile_gains, adjusted_transforms, canvas_w, c
         if i not in tile_rois:
             continue
         img = compensated_images[i]
-        x0, y0, x1, y1, H_roi = tile_rois[i]
+        x0, y0, x1, y1, H_roi_3x3, is_homo = tile_rois[i]
         rw, rh = x1 - x0, y1 - y0
 
-        warped_img = cv2.warpAffine(img, H_roi, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        if is_homo:
+            warped_img = cv2.warpPerspective(img, H_roi_3x3, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        else:
+            warped_img = cv2.warpAffine(img, H_roi_3x3[:2], (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
         tile_seam_mask = (best_tile_idx[y0:y1, x0:x1] == i).astype(np.uint8) * 255
         blender.feed(warped_img.astype(np.int16), tile_seam_mask, (x0, y0))
 
     result_img, result_mask = blender.blend(None, None)
+    if result_img is None or result_mask is None:
+        bg_col = 255 if background_mode == 'white' else 0
+        return np.full((canvas_h, canvas_w, 3), bg_col, dtype=np.uint8), np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+
     final_rgb = np.clip(result_img, 0, 255).astype(np.uint8)
 
     bg_val = 255 if background_mode == 'white' else 0
