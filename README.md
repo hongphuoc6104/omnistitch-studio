@@ -39,7 +39,7 @@ The Clarity Inspector ranks co-registered candidates by an alpha-weighted varian
 - **✨ Localized Clarity Inspector**: Quantifies localized sharpness via variance of Laplacian across all overlapping slices. Allows researchers to click and replace blurry or cloudy areas with the sharpest captured slice.
 - **🎨 Interactive Canva-Style Canvas & Invisible Masking**: Intuitive manual transform controls (pan, zoom, rotate, layer opacity) plus an invisible brush (Alpha = 0 masking) to erase unwanted artifacts.
 - **⚡ Tiled Manual TIFF Export**: Bounded spatial rendering and memory-mapped intermediates for the manual TIFF/BigTIFF path. Automatic compositing remains full canvas.
-- **🧪 Automated Verification**: Includes 53 test methods covering descriptor matching, registration ground truth, spanning-forest construction, coordinate contracts, project state, security boundaries, DZI publication, and alpha compositing.
+- **🧪 Automated Verification**: Includes 85 test methods across 15 suites covering descriptor matching, registration ground truth, spanning-forest construction, coordinate contracts, project state, security boundaries, DZI publication, focus stacking, and alpha compositing.
 
 ---
 
