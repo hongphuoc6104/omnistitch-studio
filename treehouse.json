@@ -1,0 +1,9 @@
+{
+  "dir": "../worktrees",
+  "defaultTargetBranch": "master",
+  "lockExpiryMinutes": 60,
+  "setup-worktree": [],
+  "worktree.cleanup.enabled": true,
+  "worktree.cleanup.retentionDays": 7,
+  "worktree.cleanup.maxSizeGB": 10
+}
