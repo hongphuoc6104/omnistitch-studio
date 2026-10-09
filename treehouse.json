@@ -2,7 +2,12 @@
   "dir": "../worktrees",
   "defaultTargetBranch": "master",
   "lockExpiryMinutes": 60,
-  "setup-worktree": [],
+  "setup-worktree": [
+    "ln -sfn ../../HANDBOOK.md HANDBOOK.md",
+    "ln -sfn ../../run_tests.sh run_tests.sh",
+    "ln -sfn ../../pipeline.sh pipeline.sh",
+    "ln -sfn ../../.lavish .lavish"
+  ],
   "worktree.cleanup.enabled": true,
   "worktree.cleanup.retentionDays": 7,
   "worktree.cleanup.maxSizeGB": 10
