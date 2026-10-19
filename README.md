@@ -26,6 +26,10 @@
 
 ## 🎯 Workflow Scope
 
+For research dataset preparation, the opt-in [bounded native-focus mosaic API](docs/DATASET_MOSAIC.md)
+exports registered camera frames with source-ownership, coverage and seam maps.
+It selects native captured detail and keeps the existing Studio blender unchanged.
+
 **OmniStitch Studio** targets approximately planar image sets such as microscope-stage scans. It can also load other overlapping planar images, but it does not implement photogrammetric reconstruction, georeferencing, orthorectification, semantic cloud detection, or clinical image-quality assessment.
 
 The Clarity Inspector ranks co-registered candidates by an alpha-weighted variance of the grayscale Laplacian. The score is a texture sharpness cue, not an automatic biological-quality or cloud-free classification. Users review candidates before applying a local replacement.
