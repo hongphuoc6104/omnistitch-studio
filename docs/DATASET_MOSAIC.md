@@ -56,8 +56,8 @@ This is a baseline ranking cue sensitive to noise, exposure and tissue content;
 it is not a biological focus ground truth. Inspect artifacts, texture-poor regions
 and same-world-position comparisons before choosing a production policy. The
 RGB output selects one captured source per pixel, with geometric interpolation.
-There is no defringe, color balancing, sharpening, deblurring or flat-field
-correction in this path. Hard ownership transitions can remain visible. Compare
+The default path has no defringe, color balancing, sharpening, deblurring or
+flat-field correction. Hard ownership transitions can remain visible. Compare
 photometric corrections with ownership fixed in a separate experiment.
 
 ## Artifacts and limits
@@ -113,3 +113,23 @@ selection behavior on known synthetic detail, not accuracy of real nuclei.
 Tests also exercise chunk/order invariance, full projective geometry, uint32 owner
 IDs, missing coverage, rollback, resident-page reclamation and decode/ROI/disk
 guards. Real-data selection and registration still require separate validation.
+
+## Optional relative exposure experiment
+
+When no blank/dark calibration exists, `estimate_overlap_scalar_gains` from
+`backend.dataset_photometry` proposes a scalar per source using matching overlap
+positions in low-resolution luminance proxies. Alternate sample positions fit
+and evaluate the log-ratio residual. It is code-space relative exposure matching,
+not a calibrated flat-field, white balance or stain normalization. Spatial
+vignetting can remain.
+
+Pass the proposal's `sourceGains` as `source_scalar_gains` to the exporter. The
+focus maps and ownership remain fixed; only selected RGB values are scaled
+jointly after geometric interpolation and rounded to uint8. Gains are dim-only
+in [0.5, 1] (the estimator defaults to [0.85, 1]) to prevent new highlight clipping.
+Each evidenced component is normalized independently; sources without useful
+photometric evidence stay at gain one and are listed explicitly. This trades a
+small global brightness reduction for relative consistency; inspect tissue,
+seams and held-position residuals before choosing it over the uncorrected control.
+Keep both variants and their provenance. Neither variant is automatically accepted
+for training.

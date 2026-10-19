@@ -339,7 +339,12 @@ def _render_tile(sources, bounds, box, step, budget, stats):
         better = score > best
         second = np.where(better, best, np.maximum(second, score))
         best = np.maximum(best, score)
-        rgb[better] = warped[better]
+        if source.get("gain", 1.0) == 1.0:
+            rgb[better] = warped[better]
+        else:
+            rgb[better] = np.rint(
+                warped[better].astype(np.float32) * source["gain"]
+            ).astype(np.uint8)
         owner[better] = index
     valid = owner != 0
     margin = np.zeros((height, width), dtype=np.uint8)
@@ -374,6 +379,7 @@ def export_dataset_mosaic(
     memory_budget_bytes=512 * 1024 * 1024,
     max_output_pixels=2_000_000_000,
     progress_callback=None,
+    source_scalar_gains=None,
 ):
     """Export registered RGB frames and owner/mask maps using native focus scores.
 
@@ -403,7 +409,19 @@ def export_dataset_mosaic(
         raise ValueError("Invalid tile/focus configuration")
     if memory_budget_bytes < 8 * 1024 * 1024:
         raise ValueError("Memory budget must be at least 8 MiB")
+    edges = tuple((str(a), str(b)) for a, b in edges)
+    landmarks = tuple(landmarks)
     sources, qc = _validate_sources(sources, workspace_root, edges, landmarks)
+    gains = {} if source_scalar_gains is None else source_scalar_gains
+    if set(gains) - {s["id"] for s in sources}:
+        raise ValueError("Exposure gains contain unknown source IDs")
+    for source in sources:
+        gain = float(gains.get(source["id"], 1.0))
+        if not np.isfinite(gain) or not 0.5 <= gain <= 1.0:
+            raise ValueError(
+                "Exposure gains must be finite dim-only scalars in [0.5,1]"
+            )
+        source["gain"] = gain
     output_dir = Path(resolve_file_path(str(output_dir), workspace_root))
     bounds = (
         math.floor(min(s["bounds"][0] for s in sources)),
@@ -489,6 +507,7 @@ def export_dataset_mosaic(
                     "height": source["height"],
                     "sourceToWorld": source["matrix"].ravel().tolist(),
                     "worldToSource": source["inverse"].ravel().tolist(),
+                    "scalarGain": source["gain"],
                 }
             )
             del rgb
@@ -551,8 +570,20 @@ def export_dataset_mosaic(
             "focusStep": focus_step,
             "focusWindow": focus_window,
             "qualityMarginMeaning": "relative score gap, not calibrated confidence; single coverage=255",
-            "photometricProcessing": "none; RGB from one observation, geometric interpolation only",
+            "photometricProcessing": "dim-only scalar RGB after interpolation; native owner fixed"
+            if source_scalar_gains is not None
+            else "none; RGB from one observation, geometric interpolation only",
             "geometryQC": qc,
+            "matchGraphEdges": edges,
+            "landmarks": [
+                {
+                    "source_a": str(p["source_a"]),
+                    "source_b": str(p["source_b"]),
+                    "xy_a": np.asarray(p["xy_a"], dtype=float).tolist(),
+                    "xy_b": np.asarray(p["xy_b"], dtype=float).tolist(),
+                }
+                for p in landmarks
+            ],
             "sources": provenance,
             "renderStats": stats,
             "artifacts": {Path(a).name: _sha256(a) for a, _ in artifacts},

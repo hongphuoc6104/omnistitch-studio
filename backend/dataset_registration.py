@@ -225,6 +225,7 @@ def register_camera_frames(
             "loopResidualP95WorldPx": float(np.percentile(loop_errors, 95))
             if loop_errors
             else 0,
+            "loopResidualSampling": "source corners/center, including non-overlap extrapolation; not independent landmark error",
             "trainingAccepted": False,
             "status": "needs_independent_landmark_and_loop_review",
         },
