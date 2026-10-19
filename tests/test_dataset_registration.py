@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from backend.dataset_mosaic import export_dataset_mosaic
+from backend.dataset_mosaic import export_dataset_mosaic, read_dataset_region
 from backend.dataset_registration import register_camera_frames
 
 
@@ -54,6 +54,34 @@ class TestDatasetRegistration(unittest.TestCase):
                 sources.append({"id": name, "path": str(p)})
             with self.assertRaisesRegex(ValueError, "Disconnected"):
                 register_camera_frames(sources, root)
+
+    def test_disconnected_components_export_separately(self):
+        with tempfile.TemporaryDirectory() as root:
+            sources = []
+            for name, value in [("a", 60), ("b", 170)]:
+                path = Path(root) / (name + ".png")
+                Image.fromarray(np.full((128, 128, 3), value, dtype=np.uint8)).save(
+                    path
+                )
+                sources.append({"id": name, "path": str(path)})
+            result = register_camera_frames(sources, root, allow_disconnected=True)
+            self.assertEqual(result["diagnostics"]["componentCount"], 2)
+            self.assertEqual(len(result["components"]), 2)
+            for component, value in zip(result["components"], [60, 170]):
+                self.assertEqual(len(component["sources"]), 1)
+                self.assertEqual(component["edges"], [])
+                meta = export_dataset_mosaic(
+                    component["sources"],
+                    Path(root) / component["id"],
+                    root,
+                    tile_size=64,
+                )
+                self.assertEqual(meta["outputWidth"], 128)
+                crop = read_dataset_region(
+                    Path(root) / component["id"] / "mosaic.tif", (0, 0, 128, 128), root
+                )
+                self.assertTrue(np.all(crop == value))
+                self.assertFalse(meta["geometryQC"]["trainingAccepted"])
 
     def test_rejects_duplicate_ids_and_decode_budget(self):
         with tempfile.TemporaryDirectory() as root:

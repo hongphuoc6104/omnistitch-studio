@@ -133,3 +133,12 @@ small global brightness reduction for relative consistency; inspect tissue,
 seams and held-position residuals before choosing it over the uncorrected control.
 Keep both variants and their provenance. Neither variant is automatically accepted
 for training.
+
+### Independent components for batch review
+
+`register_camera_frames(..., allow_disconnected=True)` returns `components`, each
+with its own `sources`, `edges` and component-local 3×3 coordinates. Render each
+component separately. Never pass the combined sources to a canvas across
+components: unrelated roots have identity transforms. Default registration still
+rejects disconnected graphs. Singleton components are valid review exports;
+connectivity/export never implies training acceptance.

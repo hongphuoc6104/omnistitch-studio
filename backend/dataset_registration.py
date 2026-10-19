@@ -25,14 +25,19 @@ def register_camera_frames(
     memory_budget_bytes=512 * 1024 * 1024,
     max_pairs=6000,
     progress_callback=None,
+    allow_disconnected=False,
 ):
     """Return sources/edges/diagnostics for ``export_dataset_mosaic``.
 
     Input entries contain unique id/path; optional width/height are verified.
+    allow_disconnected=True returns independent component-local coordinate systems;
+    components must be exported separately, never overlaid using top-level sources.
     All-pairs proposals are intentional without stage metadata; feature count,
     decode size and retained descriptor bytes have explicit limits. Brightness
     enhancement is applied only inside the feature detector, never to RGB data.
     """
+    if not isinstance(allow_disconnected, bool):
+        raise TypeError("allow_disconnected must be boolean")
     if any(
         not isinstance(value, int) or isinstance(value, bool)
         for value in (
@@ -167,6 +172,8 @@ def register_camera_frames(
     visited = {0}
     world = {0: np.eye(3)}
     tree = []
+    component_ids = {0: 0}
+    component_count = 1
     by_id = {f["id"]: i for i, f in enumerate(features)}
     while len(visited) < n:
         candidates = []
@@ -176,13 +183,22 @@ def register_camera_frames(
                 candidates.append((edge["score"], a, b))
         if not candidates:
             missing = [features[i]["id"] for i in range(n) if i not in visited]
-            raise ValueError(
-                "Disconnected match graph; unresolved source IDs: " + ",".join(missing)
-            )
+            if not allow_disconnected:
+                raise ValueError(
+                    "Disconnected match graph; unresolved source IDs: "
+                    + ",".join(missing)
+                )
+            root = min(set(range(n)) - visited)
+            world[root] = np.eye(3)
+            component_ids[root] = component_count
+            component_count += 1
+            visited.add(root)
+            continue
         _, a, b = max(candidates, key=lambda c: (c[0], -c[1], -c[2]))
         if a not in visited:
             a, b = b, a
         world[b] = world[a] @ transforms[(a, b)]
+        component_ids[b] = component_ids[a]
         visited.add(b)
         tree.append((a, b))
     registered = []
@@ -210,10 +226,27 @@ def register_camera_frames(
                 (direct[:2] / direct[2] - tree_mapped[:2] / tree_mapped[2]).T, axis=1
             ).tolist()
         )
+    components = []
+    for component in range(component_count):
+        ids = {features[i]["id"] for i in range(n) if component_ids[i] == component}
+        components.append(
+            {
+                "id": f"component_{component:03d}",
+                "sources": [source for source in registered if source["id"] in ids],
+                "edges": [
+                    (edge["source"], edge["target"])
+                    for edge in accepted
+                    if edge["source"] in ids and edge["target"] in ids
+                ],
+            }
+        )
     return {
+        "coordinateContract": "Transforms are component-local; never combine disconnected components on one canvas",
+        "components": components,
         "sources": registered,
         "edges": [(e["source"], e["target"]) for e in accepted],
         "diagnostics": {
+            "componentCount": component_count,
             "sourceCount": n,
             "pairProposals": proposed,
             "acceptedPairs": accepted,
