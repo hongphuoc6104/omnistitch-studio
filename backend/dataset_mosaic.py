@@ -364,7 +364,17 @@ def export_dataset_mosaic(
     output_dir.mkdir(parents=True, exist_ok=True)
     if any(Path(s["path"]).parent == output_dir for s in sources):
         raise ValueError("Output directory must be separate from source directory")
-    required_disk = width * height * 24 + source_bytes + 16 * 1024 * 1024
+    encoded_tile = math.ceil(tile_size / 16) * 16
+    padded_pixels = (
+        math.ceil(width / encoded_tile)
+        * math.ceil(height / encoded_tile)
+        * encoded_tile**2
+    )
+    required_disk = (
+        max(width * height * 24, width * height * 10 + padded_pixels * 10)
+        + source_bytes
+        + 16 * 1024 * 1024
+    )
     if required_disk > shutil.disk_usage(output_dir).free:
         raise OSError("Insufficient disk capacity for staged dataset mosaic")
     stage = Path(tempfile.mkdtemp(prefix=".dataset.", dir=output_dir))

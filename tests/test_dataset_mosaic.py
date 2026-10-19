@@ -317,6 +317,27 @@ class TestDatasetMosaic(unittest.TestCase):
                     memory_budget_bytes=8 * 1024 * 1024,
                 )
 
+    def test_disk_preflight_counts_padded_tiles_for_thin_outputs(self):
+        with tempfile.TemporaryDirectory() as root:
+            a = self._source(
+                root,
+                "thin",
+                np.zeros((1, 64, 3), dtype=np.uint8),
+                [1000, 0, 0, 0, 1, 0, 0, 0, 1],
+            )
+            with (
+                mock.patch(
+                    "backend.dataset_mosaic.shutil.disk_usage",
+                    return_value=mock.Mock(free=32 * 1024 * 1024),
+                ),
+                mock.patch(
+                    "backend.dataset_mosaic.write_tiled_tiff",
+                    side_effect=AssertionError("preflight must reject before writing"),
+                ),
+                self.assertRaisesRegex(OSError, "capacity"),
+            ):
+                export_dataset_mosaic([a], Path(root) / "out", root)
+
 
 if __name__ == "__main__":
     unittest.main()
