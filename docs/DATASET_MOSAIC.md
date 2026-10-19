@@ -41,6 +41,9 @@ Spanning-tree transforms and loop residuals are diagnostics, not bundle
 adjustment or an independent proof of geometry. Persist the returned registration
 diagnostics alongside the mosaic manifest.
 
+The default proposal budget is 6,000 pairs (enough for 101 frames); larger jobs
+must choose a deliberate budget rather than silently starting unbounded matching.
+
 ## Selecting captured detail
 
 The exporter computes variance of a grayscale Laplacian on native crops
@@ -77,6 +80,21 @@ writing. The byte budget is a conservative working-array estimate, not a hard
 process RSS limit covering codecs, Python, or OS caches. Benchmark actual peak
 RSS on the target runtime. Disk preflight includes caches and staged output.
 Publication uses the existing artifact-set rollback mechanism.
+Disk preflight accounts for padded TIFF tiles, including very thin crops.
+
+Read training/inspection patches without decoding a whole output image:
+
+```python
+from backend.dataset_mosaic import read_dataset_region
+rgb = read_dataset_region("/project/output/section-a/mosaic.tif",
+                          (1024, 2048, 1280, 2304), "/project")
+owner_ids = read_dataset_region("/project/output/section-a/owner.tif",
+                                (1024, 2048, 1280, 2304), "/project")
+```
+
+The bounded reader accepts the uncompressed contiguous tiled unsigned TIFFs
+produced here, retains owner-label dtype and rejects an over-budget ROI. It
+does not fall back to a whole-image decode when the mosaic is large.
 
 Independent landmarks may be supplied as dictionaries containing `source_a`,
 `xy_a`, `source_b`, `xy_b`. Median/p95 distances are in world pixels; a 1/3 pixel

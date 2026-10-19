@@ -25,6 +25,77 @@ from .wsi_exporter import (
 )
 
 
+def read_dataset_region(
+    path, box, workspace_root, *, memory_budget_bytes=64 * 1024 * 1024
+):
+    """Read only intersecting uncompressed contiguous TIFF tiles, preserving dtype.
+
+    This reader is for dataset artifacts produced by ``write_tiled_tiff``;
+    uint32 owner labels are not converted to display RGB. No full-image fallback
+    is used, including for output mosaics larger than the camera decode guard.
+    """
+    path = resolve_file_path(str(path), workspace_root)
+    if len(box) != 4 or any(not isinstance(v, int) or isinstance(v, bool) for v in box):
+        raise ValueError("Region box must contain four integers")
+    if memory_budget_bytes < 1:
+        raise ValueError("Memory budget must be positive")
+    x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid region box")
+    with tifffile.TiffFile(path) as tif:
+        page = tif.pages[0]
+        if (
+            len(tif.pages) != 1
+            or not page.is_tiled
+            or page.compression != 1
+            or page.planarconfig != 1
+            or page.imagedepth != 1
+            or page.dtype.kind != "u"
+        ):
+            raise ValueError(
+                "Expected single-plane uncompressed contiguous tiled unsigned TIFF"
+            )
+        width, height = page.imagewidth, page.imagelength
+        x1, y1 = max(0, min(width, x1)), max(0, min(height, y1))
+        x2, y2 = max(x1, min(width, x2)), max(y1, min(height, y2))
+        channels = page.samplesperpixel
+        shape = (y2 - y1, x2 - x1) if channels == 1 else (y2 - y1, x2 - x1, channels)
+        roi_bytes = (y2 - y1) * (x2 - x1) * channels * page.dtype.itemsize
+        tile_bytes = page.tilewidth * page.tilelength * channels * page.dtype.itemsize
+        if roi_bytes + tile_bytes * 3 > memory_budget_bytes:
+            raise MemoryError("Dataset region decode exceeds memory budget")
+        result = np.empty(shape, dtype=page.dtype)
+        if x1 == x2 or y1 == y2:
+            return result
+        columns = math.ceil(width / page.tilewidth)
+        for ty in range(y1 // page.tilelength, (y2 - 1) // page.tilelength + 1):
+            for tx in range(x1 // page.tilewidth, (x2 - 1) // page.tilewidth + 1):
+                index = ty * columns + tx
+                if page.databytecounts[index] > tile_bytes:
+                    raise ValueError("Uncompressed TIFF tile byte count is invalid")
+                tif.filehandle.seek(page.dataoffsets[index])
+                raw = tif.filehandle.read(page.databytecounts[index])
+                decoded, _, _ = page.decode(raw, index)
+                if decoded is None:
+                    raise ValueError("Dataset tile is missing")
+                tile = decoded.reshape(
+                    (page.tilelength, page.tilewidth)
+                    if channels == 1
+                    else (page.tilelength, page.tilewidth, channels)
+                )
+                ox, oy = tx * page.tilewidth, ty * page.tilelength
+                ax, ay, bx, by = (
+                    max(x1, ox),
+                    max(y1, oy),
+                    min(x2, ox + page.tilewidth),
+                    min(y2, oy + page.tilelength),
+                )
+                result[ay - y1 : by - y1, ax - x1 : bx - x1] = tile[
+                    ay - oy : by - oy, ax - ox : bx - ox
+                ]
+        return result
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:

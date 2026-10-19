@@ -8,7 +8,11 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from backend.dataset_mosaic import _native_focus_grid, export_dataset_mosaic
+from backend.dataset_mosaic import (
+    _native_focus_grid,
+    export_dataset_mosaic,
+    read_dataset_region,
+)
 from backend.wsi_exporter import _reclaim_memmap_pages, write_tiled_tiff
 
 
@@ -337,6 +341,34 @@ class TestDatasetMosaic(unittest.TestCase):
                 self.assertRaisesRegex(OSError, "capacity"),
             ):
                 export_dataset_mosaic([a], Path(root) / "out", root)
+
+    def test_dataset_region_reads_cross_tile_rgb_and_owner_without_full_decode(self):
+        with tempfile.TemporaryDirectory() as root:
+            rng = np.random.default_rng(71)
+            for name, array in [
+                ("rgb", rng.integers(0, 255, (129, 177, 3), dtype=np.uint8)),
+                ("owner", rng.integers(65536, 2**31, (129, 177), dtype=np.uint32)),
+            ]:
+                p = Path(root) / (name + ".tif")
+                write_tiled_tiff(array, str(p), tile_size=32, is_mask=name == "owner")
+                with mock.patch(
+                    "tifffile.imread",
+                    side_effect=AssertionError("full decode forbidden"),
+                ):
+                    crop = read_dataset_region(p, (29, 31, 133, 128), root)
+                self.assertTrue(np.array_equal(crop, array[31:128, 29:133]))
+                self.assertEqual(crop.dtype, array.dtype)
+
+    def test_dataset_region_rejects_budget_and_non_tiled_inputs(self):
+        with tempfile.TemporaryDirectory() as root:
+            p = Path(root) / "map.tif"
+            a = np.zeros((64, 64, 3), dtype=np.uint8)
+            write_tiled_tiff(a, str(p), tile_size=32)
+            with self.assertRaisesRegex(MemoryError, "budget"):
+                read_dataset_region(p, (0, 0, 64, 64), root, memory_budget_bytes=100)
+            tifffile.imwrite(Path(root) / "strip.tif", a, photometric="rgb")
+            with self.assertRaisesRegex(ValueError, "tiled"):
+                read_dataset_region(Path(root) / "strip.tif", (0, 0, 32, 32), root)
 
 
 if __name__ == "__main__":
