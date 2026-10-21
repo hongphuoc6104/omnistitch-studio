@@ -209,3 +209,5 @@ Copyright (c) 2026 **Tien-Phat Nguyen (HalogenBr)**.
 Researchers and developers may use, modify, and distribute this software under the MIT License. The software is not validated as a medical device or diagnostic system.
 
 Experimental fixed-owner illumination comparison helpers (separate from Studio): [pilot mathematics and limits](tools/photometry_pilot/README.md).
+
+P3 fixed-owner exposure derivatives and float TIFF reading: [format and safeguards](docs/DATASET_EXPOSURE.md).
