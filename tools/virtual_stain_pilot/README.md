@@ -27,6 +27,10 @@ Inspect the resulting native contacts before any training.
 Training requires a CUDA-enabled PyTorch environment, refuses accidental CPU
 execution, and is bounded to 1000 updates / 45 training minutes. Only the decoder
 is fine-tuned. Sampling balances patients separately in THO and H&E; validation
+and training initially use a texture-rich core (`--min-structure 0.75`) of the
+curated dataset. This is an explicit sampling bias for feasibility, not a claim
+about performance on low-contrast tissue or the entire section. Actual sampled
+counts and threshold are saved in the run configuration. Validation
 references are fixed TRAIN H&E crops. Test data is rejected. PNGs are previews
 clamped to [0,1]; `.npy` predictions retain the numerical output. Checkpoints
 include decoder, optimizer, RNG state and configuration; they contain data-derived

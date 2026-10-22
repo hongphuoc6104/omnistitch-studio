@@ -45,6 +45,8 @@ def main(args):
         raise RuntimeError("GPU pilot refuses an accidental CPU training run")
     if not 1 <= args.steps <= 1000 or not 1 <= args.seconds <= 2700:
         raise ValueError("Pilot budget exceeds 1000 steps / 45 minutes")
+    if not .25 <= args.min_structure <= 1:
+        raise ValueError("Unsupported native structure sampling gate")
     torch.set_num_threads(2)
     random.seed(2026)
     np.random.seed(2026)
@@ -72,6 +74,8 @@ def main(args):
             raise ValueError("This version expects native sensor crops")
         if row.get("structured_fraction", 0) < .25:
             raise ValueError("Native texture curation has not passed")
+        if row["structured_fraction"] < args.min_structure:
+            continue
         buckets.setdefault((split, domain), {}).setdefault(patient, []).append(row)
     if any(not buckets.get(key) for key in [("train", "THO"), ("train", "HE"), ("validation", "THO")]):
         raise ValueError("Missing train domains or held-out THO")
@@ -124,10 +128,13 @@ def main(args):
         return torch.stack([tensor(random.choice(patients[random.choice(sorted(patients))])) for _ in range(2)])
 
     # References are permanently fixed from TRAIN H&E, never from held-out target.
-    references = [buckets[("train", "HE")][p][0] for p in sorted(buckets[("train", "HE")])[:3]]
+    references = [max(buckets[("train", "HE")][p], key=lambda r: r["structured_fraction"])
+                  for p in sorted(buckets[("train", "HE")])[:3]]
     validation = []
     for patient in sorted(buckets[("validation", "THO")]):
-        validation.extend(buckets[("validation", "THO")][patient][:4])
+        ordered = sorted(buckets[("validation", "THO")][patient],
+                         key=lambda r: r["structured_fraction"], reverse=True)
+        validation.extend(ordered[:4])
     validation = validation[:12]
     history = []
 
@@ -164,10 +171,13 @@ def main(args):
                                     "output_std": float(predicted.std()),
                                     "display_out_of_range_fraction": float(np.mean((predicted < 0) | (predicted > 1)))})
         (folder / "diagnostics.json").write_text(json.dumps(diagnostics, indent=2) + "\n")
+        checkpoint = output / f"checkpoint_{step:04d}.pt"
+        temporary = checkpoint.with_suffix(".pt.tmp")
         torch.save({"decoder": decoder.state_dict(), "optimizer": optimizer.state_dict(),
                     "step": step, "random_state": random.getstate(),
                     "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state_all(),
-                    "numpy_rng": np.random.get_state(), "config": vars(args)}, output / f"checkpoint_{step:04d}.pt")
+                    "numpy_rng": np.random.get_state(), "config": vars(args)}, temporary)
+        temporary.replace(checkpoint)
         decoder.train()
         print("VALIDATED_CHECKPOINT", step, flush=True)
 
@@ -176,6 +186,8 @@ def main(args):
            "gpu": torch.cuda.get_device_name(0), "torch": torch.__version__,
            "interpretation": "unpaired style-transfer feasibility; no cell-level target",
            "test_used": False, "trainingAccepted": False}
+    run["sampled_patch_counts"] = {split + "_" + domain: sum(map(len, patients.values()))
+                                   for (split, domain), patients in buckets.items()}
     (output / "run.json").write_text(json.dumps(run, indent=2) + "\n")
     evaluate(0)
     start = time.monotonic()
@@ -232,4 +244,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seconds", type=int, default=2700)
+    parser.add_argument("--min-structure", type=float, default=.75,
+                        help="Texture-rich technical pilot core, not a tissue annotation")
     main(parser.parse_args())
