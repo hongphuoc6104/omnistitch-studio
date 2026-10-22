@@ -89,11 +89,28 @@ def native_candidates(rgb, size):
             saturation = (maximum - minimum) / np.maximum(maximum, 1)
             foreground = float(np.mean((local < white - 12) | (saturation > .07)))
             focus = float(cv2.Laplacian(local, cv2.CV_32F).var())
+            structure = structured_fraction(crop)
             candidates.append({"box": [x, y, size, size],
                                "foreground_heuristic": foreground,
                                "native_laplacian_variance": focus,
-                               "eligible": foreground >= .20 and focus > 1.0})
+                               "structured_fraction": structure,
+                               "eligible": foreground >= .20 and focus > 1.0 and structure >= .25})
     return candidates
+
+
+def structured_fraction(rgb):
+    """Fraction of native 64px blocks with p90-p10 >=12 sensor code values.
+
+    A conservative *technical pilot* texture gate calibrated against inspected
+    tinted-glass negatives. It may exclude low-contrast tissue; it is not a
+    medical tissue mask. No filtering or contrast enhancement touches pixels.
+    """
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    contrasts = [float(np.percentile(gray[y:y + 64, x:x + 64], 90)
+                       - np.percentile(gray[y:y + 64, x:x + 64], 10))
+                 for y in range(0, gray.shape[0], 64)
+                 for x in range(0, gray.shape[1], 64)]
+    return float(np.mean(np.asarray(contrasts) >= 12))
 
 
 def prepare(config, source_root, output):

@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from tools.virtual_stain_pilot.prepare import contained, native_candidates, prepare, validate_orders
+from tools.virtual_stain_pilot.curate import curate
 
 
 class VirtualStainPreparationTests(unittest.TestCase):
@@ -91,6 +92,40 @@ class VirtualStainPreparationTests(unittest.TestCase):
         scores = native_candidates(textured, 128)
         self.assertTrue(all(row["eligible"] for row in scores))
         self.assertGreater(min(row["native_laplacian_variance"] for row in scores), 100)
+
+    def test_e2e_tinted_noisy_glass_never_becomes_training_tissue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.make_dataset(root)
+            noise = np.random.default_rng(55).normal(0, .6, (640, 640, 1))
+            glass = np.rint(np.array([170, 168, 150]) + noise).clip(0, 255).astype(np.uint8)
+            path = root / "0.tif"
+            Image.fromarray(glass).save(path)
+            config["jobs"][0]["candidates"][0]["md5_index"] = hashlib.md5(path.read_bytes()).hexdigest()
+            manifest = prepare(config, root, root / "output")
+            leaked = [row for row in manifest["records"]
+                      if row["patient_id"] == "101" and row["domain"] == "THO"]
+            self.assertEqual(leaked, [], "Featureless tinted glass passed as tissue")
+
+    def test_versioned_curation_preserves_pixels_and_original_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = prepare(self.make_dataset(root), root, root / "v1")
+            glass_path = root / "v1/patches/glass.png"
+            Image.fromarray(np.full((128, 128, 3), [170, 168, 150], dtype=np.uint8)).save(glass_path)
+            glass = {**manifest["records"][0], "file": "patches/glass.png",
+                     "sha256": hashlib.sha256(glass_path.read_bytes()).hexdigest()}
+            manifest["records"].append(glass)
+            original = root / "v1/manifest.json"
+            original.write_text(json.dumps(manifest))
+            before = original.read_bytes()
+            result = curate(root / "v1", root / "v2")
+            self.assertEqual(len(result["records"]), 16)
+            self.assertEqual(result["curation_rejected"][0]["file"], "patches/glass.png")
+            self.assertEqual(original.read_bytes(), before)
+            for row in result["records"]:
+                self.assertEqual((root / "v1" / row["file"]).read_bytes(),
+                                 (root / "v2" / row["file"]).read_bytes())
 
 
 if __name__ == "__main__":

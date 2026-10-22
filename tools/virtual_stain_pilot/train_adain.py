@@ -70,6 +70,8 @@ def main(args):
             raise ValueError("Patch path/hash validation failed")
         if row["coordinate_system"] != "original_sensor_pixels":
             raise ValueError("This version expects native sensor crops")
+        if row.get("structured_fraction", 0) < .25:
+            raise ValueError("Native texture curation has not passed")
         buckets.setdefault((split, domain), {}).setdefault(patient, []).append(row)
     if any(not buckets.get(key) for key in [("train", "THO"), ("train", "HE"), ("validation", "THO")]):
         raise ValueError("Missing train domains or held-out THO")

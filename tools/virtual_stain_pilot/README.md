@@ -4,6 +4,12 @@
 80% of one native sensor FOV per patient/domain. It validates patient splits,
 source MD5, path containment and cross-identity patch hashes. Native Laplacian
 variance and foreground heuristics are recorded, not presented as tissue labels.
+Tinted/uneven glass can pass brightness/saturation and have nonzero Laplacian
+variance. Eligibility additionally requires at least 25% of native 64-pixel blocks
+to have p90-p10 contrast >=12 camera code values. This is a conservative technical
+pilot gate against reviewed negatives, not a calibrated biological threshold;
+low-contrast tissue can be excluded. `curate.py` applies the same gate to a new
+version of an existing pilot without altering its original pixels or manifest.
 The small pilot intentionally avoids mosaic seams; main mosaic-based experiments
 must retain owner/3×3 transform provenance and use a separate dataset version.
 
@@ -13,6 +19,10 @@ python tools/virtual_stain_pilot/prepare.py --orders private_orders.json \
 python tools/virtual_stain_pilot/train_adain.py --dataset /private/new_dataset \
   --output /private/pilot --steps 1000 --seconds 2700
 ```
+
+For an older dataset, run `python -m tools.virtual_stain_pilot.curate --source
+/private/old_dataset --output /private/curated_dataset` from the repository root.
+Inspect the resulting native contacts before any training.
 
 Training requires a CUDA-enabled PyTorch environment, refuses accidental CPU
 execution, and is bounded to 1000 updates / 45 training minutes. Only the decoder
