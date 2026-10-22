@@ -12,7 +12,12 @@ from backend.serial_pairing import matrix3, transform_points, proxy_to_native
 
 
 def tissue_proxy(rgb):
-    """Conservative silhouette heuristic; NOT anatomical ground truth."""
+    """Filled outer-body silhouette for registration; NOT a tissue/loss mask.
+
+    Visible gland lumens can differ greatly between THO and H&E. Counting their
+    dark pixels as tissue area would bias the initial scale between modalities.
+    Disconnected external fragments remain disconnected; enclosed holes are filled.
+    """
     if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3 or max(rgb.shape[:2]) > 1600:
         raise ValueError("Expected bounded uint8 RGB proxy")
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
@@ -24,7 +29,10 @@ def tissue_proxy(rgb):
     for index in range(1, count):
         if stats[index, cv2.CC_STAT_AREA] >= max(64, mask.size * .003):
             clean[labels == index] = 255
-    return clean
+    contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    outline = np.zeros_like(clean)
+    cv2.drawContours(outline, contours, -1, 255, thickness=cv2.FILLED)
+    return outline
 
 
 def silhouette_metrics(fixed_mask, moving_mask, moving_to_fixed):
@@ -153,13 +161,19 @@ def refine_affine_mi(fixed, moving, initial, fixed_mask, moving_mask, *, iterati
     registration.SetMetricFixedMask(sitk.GetImageFromArray((fixed_mask > 0).astype(np.uint8)))
     registration.SetMetricMovingMask(sitk.GetImageFromArray((moving_mask > 0).astype(np.uint8)))
     registration.SetInterpolator(sitk.sitkLinear)
-    registration.SetOptimizerAsGradientDescentLineSearch(learningRate=.5, numberOfIterations=iterations,
-                                                        convergenceMinimumValue=1e-5, convergenceWindowSize=8)
+    # An unrestricted affine line search can leave all moving-image support even
+    # from substantial initial overlap. Bound physical displacement each update.
+    registration.SetOptimizerAsGradientDescent(
+        learningRate=1., numberOfIterations=iterations,
+        convergenceMinimumValue=1e-6, convergenceWindowSize=10,
+        estimateLearningRate=registration.EachIteration,
+        maximumStepSizeInPhysicalUnits=1.)
     registration.SetOptimizerScalesFromPhysicalShift()
     registration.SetShrinkFactorsPerLevel([4, 2, 1])
     registration.SetSmoothingSigmasPerLevel([2, 1, 0])
     registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration.SetInitialTransform(transform, inPlace=False)
+    initial_metric = float(registration.MetricEvaluate(fixed_image, moving_image))
     result = registration.Execute(fixed_image, moving_image)
     origin = np.asarray(result.TransformPoint((0., 0.)))
     inverse_refined = np.eye(3)
@@ -173,9 +187,12 @@ def refine_affine_mi(fixed, moving, initial, fixed_mask, moving_mask, *, iterati
     if np.sign(np.linalg.det(refined[:2, :2])) != np.sign(np.linalg.det(h[:2, :2])):
         raise ValueError("MI changed reflection topology")
     return refined, {"metric": "Mattes mutual information, optimizer diagnostic only",
+                     "initial_full_resolution_metric": initial_metric,
                      "value": float(registration.GetMetricValue()),
                      "stop": registration.GetOptimizerStopConditionDescription(),
-                     "threads": 2, "sampling_seed": 2026}
+                     "threads": 2, "sampling_seed": 2026,
+                     "optimizer": "gradient descent, per-iteration learning-rate estimate",
+                     "maximum_step_physical_proxy_units": 1.}
 
 
 def propose_pair(fixed, moving, *, refine=False):

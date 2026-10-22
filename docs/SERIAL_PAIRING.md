@@ -65,7 +65,7 @@ this global stage and must never be substituted into the 3×3 affine/projective
 contract. Any later deformable stage requires separate fields, fold checks,
 independent landmarks and native evidence before it can be used.
 
-The nine tests cover file→native ROI alignment, full projective third-row use,
+The core tests cover file→native ROI alignment, full projective third-row use,
 pixel-center lifting, immutable sources, streaming publication, repeat refusal,
 bounded proxy reads, capture-mask meaning, landmark separation and guards.
 Real-data pilot evidence is private; synthetic tests do not validate anatomy.
@@ -82,3 +82,5 @@ Primary references:
 Feature, mask, optimizer and QC thresholds in this implementation are experimental
 engineering choices. They are not claimed to be medical acceptance standards or
 an exact reproduction of VALIS.
+
+Affine MI uses a one-proxy-unit maximum physical step with per-iteration learning-rate estimation. This avoids the reproduced unrestricted-line-search support loss. Registration silhouettes fill enclosed lumen holes to avoid modality-dependent dark-area scale bias; they remain unsuitable as anatomical loss masks. A private-file optional MI regression is retained in `tests/test_serial_pairing_optional_mi.py`; its real fixture is never published.

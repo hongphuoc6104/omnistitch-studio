@@ -6,13 +6,14 @@ import unittest
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from backend.serial_pairing import (inspect_native_pair, landmark_report,
                                     lift_proxy_transform, make_registration_proxy,
                                     matrix3, proxy_to_native, sha256_file, transform_points,
                                     export_aligned_pair)
 from backend.dataset_mosaic import read_dataset_region
-from tools.serial_pairing.registration import propose_pair
+from tools.serial_pairing.registration import propose_pair, tissue_proxy, shape_hypothesis
 from backend.wsi_exporter import write_tiled_tiff
 
 
@@ -133,6 +134,25 @@ class TestSerialPairing(unittest.TestCase):
         self.assertFalse(result["pixel_ground_truth"])
         best = result["hypotheses"][0]
         self.assertGreater(best["final_silhouette"]["silhouette_dice"], .9)
+
+    def test_lumen_contrast_does_not_change_outline_initializer_scale(self):
+        fixed = np.full((256, 256, 3), 240, dtype=np.uint8)
+        cv2.ellipse(fixed, (128, 128), (95, 75), 0, 0, 360, (60, 60, 60), -1)
+        moving = fixed.copy()
+        for y in range(78, 181, 26):
+            for x in range(62, 195, 26):
+                if ((x - 128) / 82)**2 + ((y - 128) / 62)**2 < 1:
+                    cv2.circle(moving, (x, y), 11, (240, 240, 240), -1)
+        with tempfile.TemporaryDirectory() as root:
+            Image.fromarray(fixed).save(Path(root) / "THO.png")
+            Image.fromarray(moving).save(Path(root) / "HE.png")
+            with Image.open(Path(root) / "THO.png") as image:
+                read_fixed = np.array(image)
+            with Image.open(Path(root) / "HE.png") as image:
+                read_moving = np.array(image)
+            proposal = propose_pair(read_fixed, read_moving)["hypotheses"][0]
+        scale = abs(np.linalg.det(np.asarray(proposal["HE_proxy_to_THO_proxy"])[:2, :2]))**.5
+        self.assertAlmostEqual(scale, 1., delta=.03)
 
 
 if __name__ == "__main__":
