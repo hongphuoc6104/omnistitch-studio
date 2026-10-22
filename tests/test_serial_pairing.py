@@ -13,7 +13,7 @@ from backend.serial_pairing import (inspect_native_pair, landmark_report,
                                     matrix3, proxy_to_native, sha256_file, transform_points,
                                     export_aligned_pair)
 from backend.dataset_mosaic import read_dataset_region
-from tools.serial_pairing.registration import propose_pair, tissue_proxy, shape_hypothesis
+from tools.serial_pairing.registration import propose_pair, tissue_proxy, refine_outline_ecc
 from backend.wsi_exporter import write_tiled_tiff
 
 
@@ -153,6 +153,20 @@ class TestSerialPairing(unittest.TestCase):
             proposal = propose_pair(read_fixed, read_moving)["hypotheses"][0]
         scale = abs(np.linalg.det(np.asarray(proposal["HE_proxy_to_THO_proxy"])[:2, :2]))**.5
         self.assertAlmostEqual(scale, 1., delta=.03)
+
+    def test_multiscale_outline_affine_direction_and_homography_guard(self):
+        fixed = np.zeros((256, 320), dtype=np.uint8)
+        cv2.fillPoly(fixed, [np.array([[45, 40], [220, 65], [260, 170], [170, 225], [50, 170]])], 255)
+        cv2.rectangle(fixed, (160, 25), (190, 65), 255, -1)
+        known = np.array([[1., .03, 12.], [-.02, 1., -8.], [0, 0, 1.]])
+        moving = cv2.warpPerspective(fixed, np.linalg.inv(known), (320, 256), flags=cv2.INTER_NEAREST)
+        result, details = refine_outline_ecc(fixed, moving, np.eye(3))
+        points = np.array([[90, 90], [200, 120], [140, 170]], dtype=float)
+        error = np.linalg.norm(transform_points(result, points) - transform_points(known, points), axis=1)
+        self.assertLess(float(error.max()), 2.)
+        self.assertGreater(details["after"]["silhouette_dice"], .95)
+        with self.assertRaisesRegex(ValueError, "affine-only"):
+            refine_outline_ecc(fixed, moving, [[1, 0, 0], [0, 1, 0], [.001, 0, 1]])
 
 
 if __name__ == "__main__":

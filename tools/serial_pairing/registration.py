@@ -195,6 +195,56 @@ def refine_affine_mi(fixed, moving, initial, fixed_mask, moving_mask, *, iterati
                      "maximum_step_physical_proxy_units": 1.}
 
 
+def refine_outline_ecc(fixed_mask, moving_mask, initial):
+    """Continuously refine a rough affine using clipped signed outline distances.
+
+    OpenCV ECC estimates fixed→moving sampling parameters. This function accepts
+    affine matrices only, restores a full 3×3 and stores the inverse direction.
+    Filled-outline geometry is initialization, not anatomical correspondence.
+    """
+    h = matrix3(initial)
+    if not np.allclose(h[2], [0, 0, 1.]):
+        raise ValueError("Outline ECC is affine-only; do not truncate a homography")
+    if min(np.count_nonzero(fixed_mask), np.count_nonzero(moving_mask)) < 100:
+        raise ValueError("Insufficient silhouette for outline refinement")
+    if max(*fixed_mask.shape, *moving_mask.shape) > 1600:
+        raise ValueError("Outline exceeds bounded proxy dimensions")
+    before = silhouette_metrics(fixed_mask, moving_mask, h)
+    levels = []
+    for shrink in (4, 2, 1):
+        fs = [max(16, round(fixed_mask.shape[1] / shrink)), max(16, round(fixed_mask.shape[0] / shrink))]
+        ms = [max(16, round(moving_mask.shape[1] / shrink)), max(16, round(moving_mask.shape[0] / shrink))]
+        pf = proxy_to_native([fixed_mask.shape[1], fixed_mask.shape[0]], fs)
+        pm = proxy_to_native([moving_mask.shape[1], moving_mask.shape[0]], ms)
+        def distance(mask, size):
+            small = cv2.resize(mask, tuple(size), interpolation=cv2.INTER_NEAREST)
+            signed = cv2.distanceTransform((small == 0).astype(np.uint8), cv2.DIST_L2, 3)
+            signed -= cv2.distanceTransform((small > 0).astype(np.uint8), cv2.DIST_L2, 3)
+            return np.clip(signed / max(8., 48. / shrink), -1, 1).astype(np.float32)
+        small_h = np.linalg.inv(pf) @ h @ pm
+        inverse = np.linalg.inv(small_h)
+        # Explicit affine parameterization, with projective inputs rejected above.
+        score, affine = cv2.findTransformECC(
+            distance(fixed_mask, fs), distance(moving_mask, ms),
+            inverse[:2].astype(np.float32), cv2.MOTION_AFFINE,
+            (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 150, 1e-5),
+            inputMask=None, gaussFiltSize=5)
+        inverse = np.eye(3)
+        inverse[:2] = affine
+        h = matrix3(pf @ np.linalg.inv(inverse) @ np.linalg.inv(pm))
+        levels.append({"shrink": shrink, "outline_ecc": float(score)})
+    singular = np.linalg.svd(h[:2, :2], compute_uv=False)
+    if singular.min() < .3 or singular.max() > 3 or singular.max() / singular.min() > 1.5:
+        raise ValueError("Outline ECC proposed excessive affine distortion")
+    if np.sign(np.linalg.det(h[:2, :2])) != np.sign(np.linalg.det(matrix3(initial)[:2, :2])):
+        raise ValueError("Outline refinement changed reflection topology")
+    after = silhouette_metrics(fixed_mask, moving_mask, h)
+    if after["silhouette_dice"] + .01 < before["silhouette_dice"]:
+        raise ValueError("Outline ECC degraded silhouette; preserve initial hypothesis")
+    return h, {"levels": levels, "before": before, "after": after,
+                "interpretation": "continuous global outline initialization only"}
+
+
 def propose_pair(fixed, moving, *, refine=False):
     """Return all hypotheses and a review proposal, never an accepted pair."""
     fm, mm = tissue_proxy(fixed), tissue_proxy(moving)
@@ -206,8 +256,16 @@ def propose_pair(fixed, moving, *, refine=False):
         proposal["initial_silhouette"] = silhouette_metrics(fm, mm, h)
         if refine:
             try:
+                h, details = refine_outline_ecc(fm, mm, h)
+                proposal["outline_refinement"] = details
+                proposal["HE_proxy_to_THO_proxy_outline"] = h.tolist()
+                proposal["HE_proxy_to_THO_proxy"] = h.tolist()
+            except (cv2.error, ValueError) as error:
+                proposal["outline_refinement_rejected"] = str(error)
+            try:
                 refined, details = refine_affine_mi(fixed, moving, h, fm, mm)
                 proposal["MI_refinement"] = details
+                proposal["HE_proxy_to_THO_proxy_MI"] = refined.tolist()
                 proposal["HE_proxy_to_THO_proxy"] = refined.tolist()
             except (ValueError, RuntimeError) as error:
                 proposal["MI_refinement_rejected"] = str(error)

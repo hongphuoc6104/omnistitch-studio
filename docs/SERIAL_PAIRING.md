@@ -84,3 +84,10 @@ engineering choices. They are not claimed to be medical acceptance standards or
 an exact reproduction of VALIS.
 
 Affine MI uses a one-proxy-unit maximum physical step with per-iteration learning-rate estimation. This avoids the reproduced unrestricted-line-search support loss. Registration silhouettes fill enclosed lumen holes to avoid modality-dependent dark-area scale bias; they remain unsuitable as anatomical loss masks. A private-file optional MI regression is retained in `tests/test_serial_pairing_optional_mi.py`; its real fixture is never published.
+
+Continuous outline initialization uses multi-resolution ECC on clipped signed
+silhouette distances before multimodal affine MI. It retains each stage's 3×3
+matrix separately. ECC is affine-only here; projective inputs are rejected rather
+than truncated. Its inverse-sampling direction follows the [OpenCV ECC API](https://docs.opencv.org/doc/doxygen/html/dc/d6b/group__video__track.html).
+The synthetic direction test recovers a known asymmetric affine and rejects
+homographies. Outline improvement is still not internal anatomical validation.
