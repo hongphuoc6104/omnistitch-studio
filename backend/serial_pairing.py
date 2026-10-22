@@ -202,6 +202,67 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def assignment_hypotheses(fixed_ids, moving_ids, edges, *, max_states=100000, keep=20):
+    """Enumerate one-to-one *hypotheses* with explicit unmatched sections.
+
+    Labels have no matching semantics. This is a bounded diagnostic graph
+    analysis, not an anatomical identity classifier. Fragment relationships may
+    invalidate the one-to-one assumption; nothing is automatically selected.
+    Edge scores (e.g. outline Dice) are ranking aids, not confidence values.
+    """
+    fixed_ids, moving_ids = list(fixed_ids), list(moving_ids)
+    if (not fixed_ids or not moving_ids or max(len(fixed_ids), len(moving_ids)) > 8
+            or len(set(fixed_ids)) != len(fixed_ids) or len(set(moving_ids)) != len(moving_ids)
+            or not 1 <= keep <= 100 or max_states < 1):
+        raise ValueError("Invalid bounded assignment graph")
+    scores = {}
+    for edge in edges:
+        key = edge["fixed_id"], edge["moving_id"]
+        score = float(edge["diagnostic_score"])
+        if (key in scores or key[0] not in fixed_ids or key[1] not in moving_ids
+                or not np.isfinite(score) or not 0 <= score <= 1):
+            raise ValueError("Invalid or duplicate assignment edge")
+        scores[key] = score
+    complete, partial = [], []
+    states = 0
+    target_count = min(len(fixed_ids), len(moving_ids))
+    def visit(index, used, selected):
+        nonlocal states
+        states += 1
+        if states > max_states:
+            raise ValueError("Assignment state budget exceeded; review/limit fragment candidates")
+        if index == len(fixed_ids):
+            if not selected:
+                return
+            values = [scores[key] for key in selected]
+            row = {"edges": [{"fixed_id": a, "moving_id": b, "diagnostic_score": scores[a, b]}
+                              for a, b in selected],
+                   "unmatched_fixed": [a for a in fixed_ids if all(a != key[0] for key in selected)],
+                   "unmatched_moving": [b for b in moving_ids if b not in used],
+                   "mean_diagnostic_score": float(np.mean(values)),
+                   "minimum_edge_diagnostic_score": min(values),
+                   "cardinality": len(selected), "selected_as_true_pairing": False}
+            bucket = complete if len(selected) == target_count else partial
+            bucket.append(row)
+            bucket.sort(key=lambda r: (r["cardinality"], r["mean_diagnostic_score"],
+                                        r["minimum_edge_diagnostic_score"]), reverse=True)
+            del bucket[keep:]
+            return
+        fixed = fixed_ids[index]
+        visit(index + 1, used, selected)  # Never force a missing/bad section.
+        for moving in moving_ids:
+            if moving not in used and (fixed, moving) in scores:
+                visit(index + 1, used | {moving}, selected + [(fixed, moving)])
+    visit(0, set(), [])
+    return {"full_cardinality_hypotheses": complete, "partial_hypotheses": partial,
+            "mean_diagnostic_gap": complete[0]["mean_diagnostic_score"] - complete[1]["mean_diagnostic_score"]
+            if len(complete) >= 2 else None,
+            "states_enumerated": states, "status": "requires_native_anatomical_correspondence_review",
+            "assumption": "one-to-one hypotheses only; physical fragment mapping still needs checking",
+            "score_meaning": "diagnostic ranking, not confidence or anatomical truth",
+            "trainingAccepted": False}
+
+
 def export_aligned_pair(fixed_path, moving_path, fixed_valid_path, moving_valid_path,
                         moving_to_fixed, output_dir, workspace_root, *,
                         fixed_reference, moving_reference, tile_size=512,

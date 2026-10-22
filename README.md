@@ -211,3 +211,8 @@ Researchers and developers may use, modify, and distribute this software under t
 Experimental fixed-owner illumination comparison helpers (separate from Studio): [pilot mathematics and limits](tools/photometry_pilot/README.md).
 
 P3 fixed-owner exposure derivatives and float TIFF reading: [format and safeguards](docs/DATASET_EXPOSURE.md).
+
+Serial-section THO/H&E candidate pairing, native coordinate inspection and
+streamed review derivatives: [contracts and limitations](docs/SERIAL_PAIRING.md).
+Letter suffixes are never treated as pair identities; global and crossed
+assignment hypotheses remain pending anatomical review before paired training.

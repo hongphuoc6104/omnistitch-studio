@@ -91,3 +91,11 @@ matrix separately. ECC is affine-only here; projective inputs are rejected rathe
 than truncated. Its inverse-sampling direction follows the [OpenCV ECC API](https://docs.opencv.org/doc/doxygen/html/dc/d6b/group__video__track.html).
 The synthetic direction test recovers a known asymmetric affine and rejects
 homographies. Outline improvement is still not internal anatomical validation.
+
+`assignment_hypotheses` enumerates bounded one-to-one alternatives and unmatched
+sections. For two THO and two H&E inputs it retains both AA+BB and AB+BA, rather
+than matching letter suffixes or greedily choosing each source's best edge. The
+whole graph, alternative assignments and score gap are diagnostics only. Physical
+fragment mapping may invalidate a one-to-one assumption. Tests cover a greedy
+trap, crossed suffixes, missing sections and a hard enumeration budget. No branch
+claims anatomical identity or automatically accepts a pair for training.

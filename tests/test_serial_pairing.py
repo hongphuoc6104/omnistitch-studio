@@ -11,7 +11,7 @@ from PIL import Image
 from backend.serial_pairing import (inspect_native_pair, landmark_report,
                                     lift_proxy_transform, make_registration_proxy,
                                     matrix3, proxy_to_native, sha256_file, transform_points,
-                                    export_aligned_pair)
+                                    export_aligned_pair, assignment_hypotheses)
 from backend.dataset_mosaic import read_dataset_region
 from tools.serial_pairing.registration import propose_pair, tissue_proxy, refine_outline_ecc
 from backend.wsi_exporter import write_tiled_tiff
@@ -167,6 +167,29 @@ class TestSerialPairing(unittest.TestCase):
         self.assertGreater(details["after"]["silhouette_dice"], .95)
         with self.assertRaisesRegex(ValueError, "affine-only"):
             refine_outline_ecc(fixed, moving, [[1, 0, 0], [0, 1, 0], [.001, 0, 1]])
+
+    def test_global_assignment_includes_crossed_labels_and_defeats_greedy_choice(self):
+        edges = [{"fixed_id": a, "moving_id": b, "diagnostic_score": value}
+                 for a, b, value in [("THO_A", "HE_A", .90), ("THO_A", "HE_B", .89),
+                                     ("THO_B", "HE_A", .88), ("THO_B", "HE_B", .10)]]
+        result = assignment_hypotheses(["THO_A", "THO_B"], ["HE_A", "HE_B"], edges)
+        hypotheses = result["full_cardinality_hypotheses"]
+        self.assertEqual(len(hypotheses), 2)
+        self.assertEqual({(r["fixed_id"], r["moving_id"]) for r in hypotheses[0]["edges"]},
+                         {("THO_A", "HE_B"), ("THO_B", "HE_A")})
+        self.assertFalse(result["trainingAccepted"])
+        self.assertTrue(all(not r["selected_as_true_pairing"] for r in hypotheses))
+
+    def test_assignment_handles_missing_sections_without_duplicate_targets_or_guessing(self):
+        result = assignment_hypotheses(["THO_A", "THO_B"], ["HE_X"],
+                                       [{"fixed_id": a, "moving_id": "HE_X", "diagnostic_score": .7}
+                                        for a in ("THO_A", "THO_B")])
+        self.assertEqual(len(result["full_cardinality_hypotheses"]), 2)
+        self.assertTrue(all(len(r["unmatched_fixed"]) == 1 for r in result["full_cardinality_hypotheses"]))
+        empty = assignment_hypotheses(["THO_A"], ["HE_B"], [])
+        self.assertEqual(empty["full_cardinality_hypotheses"], [])
+        with self.assertRaisesRegex(ValueError, "budget"):
+            assignment_hypotheses(["a", "b"], ["x", "y"], [], max_states=1)
 
 
 if __name__ == "__main__":
