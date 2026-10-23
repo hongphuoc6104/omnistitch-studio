@@ -218,3 +218,6 @@ Letter suffixes are never treated as pair identities; global and crossed
 assignment hypotheses remain pending anatomical review before paired training.
 Separate backward residual fields can be reviewed on bounded native ROIs with
 one original H&E sampling; fields and sampled Jacobians do not establish pair identity.
+
+Interactive CPU Colab Drive file retrieval with immediate mount-to-fetch,
+verified transfers and owned-runtime cleanup: [terminal workflow](docs/COLAB_FETCH.md).
