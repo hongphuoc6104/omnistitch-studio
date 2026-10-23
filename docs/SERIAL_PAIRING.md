@@ -62,8 +62,8 @@ SimpleITK optimization maps fixed→moving for resampling, so its transform is
 inverted for the stored moving→fixed convention. Mattes MI is an optimization
 diagnostic, not a success certificate. Nonrigid fields are **not implemented** in
 this global stage and must never be substituted into the 3×3 affine/projective
-contract. Any later deformable stage requires separate fields, fold checks,
-independent landmarks and native evidence before it can be used.
+contract. A separate residual review sampler is described below; it does not
+turn global proposals into accepted pairs.
 
 The core tests cover file→native ROI alignment, full projective third-row use,
 pixel-center lifting, immutable sources, streaming publication, repeat refusal,
@@ -99,3 +99,40 @@ whole graph, alternative assignments and score gap are diagnostics only. Physica
 fragment mapping may invalidate a one-to-one assumption. Tests cover a greedy
 trap, crossed suffixes, missing sections and a hard enumeration budget. No branch
 claims anatomical identity or automatically accepts a pair for training.
+
+## Separate backward residual review
+
+`backend.serial_deformation` inspects bounded native ROIs with an explicitly
+separate float32 displacement field. Its direction is **THO proxy → globally
+aligned H&E proxy**, with additive displacement in fixed-proxy pixel units.
+For fixed native point `p`, fixed native/proxy scale `s`, and global forward
+matrix `H`, first compute `q = (p + 0.5) / s - 0.5`, then
+`r = (q + u(q) + 0.5) * s - 0.5`. Apply the complete `inverse(H)` to homogeneous
+native point `[r.x, r.y, 1]` to obtain the original H&E sampling location.
+Thus convert `p` to proxy centers, add the backward residual, convert back to
+native centers, then apply `inverse(H)`. The implementation keeps the
+full 3×3 matrix and currently rejects projective globals in this residual path.
+The global-only path continues to support projective matrices.
+
+The field must be contiguous float32, finite, at most 1600 pixels per side,
+within a configured displacement cap and have positive **sampled**
+`det(I + gradient(u))`. These checks do not prove continuous invertibility or
+biological correctness. Half-pixel edge extensions replicate field boundaries.
+Nonlinear source support is bounded using all mapped ROI samples, including
+interior extrema. Pre-allocation budgets cover coordinates, field and source
+support. Original H&E RGB is sampled **once** after composing the two mappings;
+double-warped proxy RGB is suitable only for preview. No sharpening, stain-color
+normalization or clarity measurement is performed here.
+
+The optional private B-spline pilot uses
+[SimpleITK's multiresolution registration framework](https://simpleitk.readthedocs.io/en/latest/link_ImageRegistrationMethodBSpline3_docs.html).
+Its mesh, optimizer bounds, metric masks and same-image reserved-position
+diagnostics are experimental choices, not published acceptance thresholds.
+Fields, transforms, input hashes and native comparisons remain versioned review
+artifacts. Independent anatomical landmarks and anatomical ignore/loss masks
+are still required before paired training; positive Jacobians or improved MI
+never supply those annotations.
+
+Tests exercise file→field→native ROI sampling, backward sign and half-pixel
+scale, affine composition, immutable source hashes, interior support extrema,
+capture masks, invalid fields, folds, displacement limits and memory guards.

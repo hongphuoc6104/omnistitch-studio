@@ -216,3 +216,5 @@ Serial-section THO/H&E candidate pairing, native coordinate inspection and
 streamed review derivatives: [contracts and limitations](docs/SERIAL_PAIRING.md).
 Letter suffixes are never treated as pair identities; global and crossed
 assignment hypotheses remain pending anatomical review before paired training.
+Separate backward residual fields can be reviewed on bounded native ROIs with
+one original H&E sampling; fields and sampled Jacobians do not establish pair identity.
