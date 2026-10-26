@@ -165,3 +165,8 @@ loops, nonmutating gradient probes, all-validation coverage, a Gaussian-score
 solver control, deterministic bundle creation, archive→parts integrity, and a
 fake CLI boundary for consent failure/cleanup/idempotence. Fake CLI tests do
 not establish real OAuth, GPU, DriveFS or histology performance.
+
+If Drive publication fails after computation, the complete local tar/part
+manifest is retained. The controller still verifies/downloads the evidence and
+stops its GPU, then reports the missing durable backup. Repair the backup with
+a CPU-only task; an existing verified result must not trigger retraining.

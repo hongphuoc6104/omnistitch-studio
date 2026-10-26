@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.nonaligned_stain.terminal_round import bundle_code, run
 from tools.nonaligned_stain.round_worker import extract_selected, archive_results, digest, stop_child
@@ -163,6 +164,26 @@ class RoundTerminalTests(unittest.TestCase):
             self.assertIsNotNone(child.returncode)
         finally:
             stop_child(child)
+
+    def test_drive_publication_failure_keeps_complete_local_transfer_manifest(self):
+        root = self.root/'worker_failure'
+        for name in ('results', 'code'):
+            (root/name).mkdir(parents=True, exist_ok=True)
+        (root/'config.json').write_text('{}')
+        (root/'results/run.json').write_text('{"completed": true}')
+        original_is_dir, original_mkdir = Path.is_dir, Path.mkdir
+        def is_dir(path):
+            return True if str(path) == '/content/drive/MyDrive' else original_is_dir(path)
+        def mkdir(path, *args, **kwargs):
+            if str(path).startswith('/content/drive/'):
+                raise PermissionError('fixture Drive unavailable')
+            return original_mkdir(path, *args, **kwargs)
+        with patch.object(Path, 'is_dir', is_dir), patch.object(Path, 'mkdir', mkdir):
+            result = archive_results(root, {'job_id': 'fixture'})
+        self.assertFalse(result['Drive_backup_verified'])
+        self.assertIn('PermissionError', result['Drive_error'])
+        self.assertEqual(result['archive_sha256'], digest(root/'round2.tar.gz'))
+        self.assertEqual(sum(p['bytes'] for p in result['parts']), result['archive_bytes'])
 
 
 if __name__ == '__main__':

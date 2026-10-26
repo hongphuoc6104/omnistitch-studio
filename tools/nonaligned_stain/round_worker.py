@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import signal
 import subprocess
@@ -99,20 +100,27 @@ def archive_results(root, cfg, failed=False):
     result = {'archive_sha256': expected, 'archive_bytes': path.stat().st_size,
               'parts': parts, 'Drive_backup_verified': False}
     if Path('/content/drive/MyDrive').is_dir():
-        dest = Path('/content/drive/MyDrive/CTU_P_experiments/20261027_round2')/cfg['job_id']
-        dest.mkdir(parents=True, exist_ok=False)
-        tmp = dest/'round2.part'
-        shutil.copyfile(path, tmp)
-        if digest(tmp) != expected:
-            raise ValueError('Drive output checksum mismatch')
-        tmp.replace(dest/'round2.tar.gz')
-        (dest/'verification.json').write_text(json.dumps({'archive_sha256': expected,
-            'archive_bytes': path.stat().st_size, 'failed': failed,
-            'verification': 'SHA readback complete; final DriveFS flush outcome is retained in controller state.'}, indent=2)+'\n')
-        from google.colab import drive
-        drive.flush_and_unmount(timeout_ms=60000)
-        result.update(Drive_backup_verified=True, Drive_archive=str(dest/'round2.tar.gz'),
-                      Drive_verification='SHA readback then DriveFS flush')
+        try:
+            dest = Path('/content/drive/MyDrive/CTU_P_experiments/20261027_round2')/cfg['job_id']
+            dest.mkdir(parents=True, exist_ok=False)
+            tmp = dest/'round2.part'
+            shutil.copyfile(path, tmp)
+            if digest(tmp) != expected:
+                raise ValueError('Drive output checksum mismatch')
+            tmp.replace(dest/'round2.tar.gz')
+            (dest/'verification.json').write_text(json.dumps({'archive_sha256': expected,
+                'archive_bytes': path.stat().st_size, 'failed': failed,
+                'verification': 'SHA readback complete; final DriveFS flush outcome is retained in controller state.'}, indent=2)+'\n')
+            from google.colab import drive
+            drive.flush_and_unmount(timeout_ms=60000)
+            result.update(Drive_backup_verified=True, Drive_archive=str(dest/'round2.tar.gz'),
+                          Drive_verification='SHA readback then DriveFS flush')
+        except Exception as error:
+            # Computation and transport evidence survive a publication outage.
+            # The controller still downloads these parts, then fails durably
+            # rather than claiming Drive success or retraining the workload.
+            result['Drive_error'] = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?[redacted]',
+                                           type(error).__name__+': '+str(error))
     return result
 
 
@@ -207,7 +215,8 @@ def run(root):
                  '--loss-weights', json.dumps(weights), '--gradient-diagnostics', '--eval-all',
                  '--compact-evaluation', seconds=900)
             report = json.loads((output/name/'run.json').read_text())
-            if not report['completed'] or report['final_validation_predictions'] != 81:
+            if (not report['completed'] or report['updates_this_run'] < 20
+                    or report['final_validation_predictions'] != 81):
                 raise ValueError('Missing complete B3 validation: '+name)
             reports.append({'name': name, 'updates': report['updates_this_run'], 'weights': weights,
                             'validation_predictions': report['final_validation_predictions'],
