@@ -221,3 +221,10 @@ one original H&E sampling; fields and sampled Jacobians do not establish pair id
 
 Interactive CPU Colab Drive file retrieval with immediate mount-to-fetch,
 verified transfers and owned-runtime cleanup: [terminal workflow](docs/COLAB_FETCH.md).
+
+## Bounded native search windows
+
+The [Colab native collector](docs/COLAB_NATIVE.md) extracts lossless RGB/capture
+windows from checksummed original mosaics on CPU, keeps full native coordinates,
+and returns only the requested regions for review. Search windows do not imply
+anatomical correspondence or training acceptance.
