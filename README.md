@@ -233,3 +233,8 @@ Two guarded paired-stain research pilots (scale-1 SwinIR and a small conditional
 latent DiT), explicit release/codec gates, checkpoint resume and CPU E2E:
 [paired 4X readiness](tools/paired_stain/README.md). Candidate images do not
 become positive pairs merely because the training code is available.
+
+Separate [nonaligned research pilots](tools/nonaligned_stain/README.md) use
+original sensor crops with contextual SwinIR and independently trained DiT
+domain bridges. They retain explicit unpaired semantics, native-source
+provenance and same-image codec/solver controls.

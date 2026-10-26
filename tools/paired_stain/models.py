@@ -47,9 +47,10 @@ def prepare_assets(root, branch):
             raise ValueError('Corrupt pinned upstream asset')
 
 
-def build(branch, size, assets, *, tiny=False):
-    """Import only checksum-verified pinned code; no silent random substitute."""
-    import torch
+def backbone_module(branch, assets):
+    """Import only checksum-verified pinned code and its retained license."""
+    if branch not in ('B', 'C'):
+        raise ValueError('Unknown backbone')
     from tools.paired_stain.data import sha256
     name = 'swinir.py' if branch == 'B' else 'dit.py'
     path = Path(assets)/name
@@ -61,6 +62,13 @@ def build(branch, size, assets, *, tiny=False):
     spec = importlib.util.spec_from_file_location('ctup_pinned_'+branch, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def build(branch, size, assets, *, tiny=False):
+    """Construct the fine-paired pilot; unpaired objectives use separate tools."""
+    import torch
+    module = backbone_module(branch, assets)
     if branch == 'B':
         return module.SwinIR(upscale=1, in_chans=3, img_size=size, window_size=8,
                              img_range=1., embed_dim=12 if tiny else 60,
