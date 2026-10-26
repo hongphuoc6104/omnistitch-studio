@@ -17,7 +17,7 @@ from tools.paired_stain.train import rng_state, restore_rng, write_json
 
 
 def train(args):
-    doc = data.validate(args.dataset)
+    doc = data.validate(args.dataset, require_same_patient_style=args.branch == 'B2')
     if args.branch not in ('B2', 'C2') or not 1 <= args.steps <= 1000 or not 1 <= args.seconds <= 2700:
         raise ValueError('Nonaligned pilot budget exceeded')
     if not 1 <= args.accumulation <= 4:

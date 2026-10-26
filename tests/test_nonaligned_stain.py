@@ -148,6 +148,25 @@ class NonalignedTorchTests(unittest.TestCase):
                 self.assertEqual(result['config']['precision'], 'fp32')
                 self.assertEqual(result['actual_optimizer_updates_this_run'], 2 if branch == 'B2' else 4)
 
+    def test_c2_can_use_a_patient_with_only_source_domain(self):
+        from tools.nonaligned_stain.train import train
+        with tempfile.TemporaryDirectory(dir=self.base) as temp:
+            base = Path(temp)
+            root = base/'data'
+            doc = fixture(root)
+            image = np.random.default_rng(77).integers(10, 240, (32, 32, 3), dtype=np.uint8)
+            path = root/'source_only.png'
+            Image.fromarray(image).save(path)
+            row = dict(doc['records'][0], patient_id='source-only', file=path.name,
+                       sha256=data.sha256(path), source_sha256=data.sha256(path),
+                       pixel_sha256=hashlib.sha256(image.tobytes()).hexdigest())
+            doc['records'].append(row)
+            (root/'manifest.json').write_text(json.dumps(doc))
+            result = train(self.args(root, base/'C2', 'C2', 1))
+            self.assertEqual(result['actual_optimizer_updates_this_run'], 2)
+            with self.assertRaisesRegex(ValueError, 'same-patient'):
+                train(self.args(root, base/'B2', 'B2', 1))
+
     def test_resume_preserves_live_and_ema_models(self):
         import torch
         from tools.nonaligned_stain.train import train

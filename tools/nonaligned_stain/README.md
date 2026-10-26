@@ -73,6 +73,9 @@ train/validation domains are checked. Test patients are rejected. A release
 explicitly states `paired=false` and `ready_for_unpaired_pilot=true`, while
 `trainingAccepted=false` continues to mean no clinical/fine-pair acceptance.
 No zero/unknown correspondence masks are turned into positive masks.
+C2 can keep patients with only one observed domain. Same-patient TRAIN style
+availability is checked specifically for B2; it must not become an accidental
+pairing requirement for independently trained C2 marginals.
 
 ```sh
 python -m tools.nonaligned_stain.data --source /private/audited_sensor_dataset \

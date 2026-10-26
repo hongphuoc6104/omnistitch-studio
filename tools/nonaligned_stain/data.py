@@ -11,7 +11,7 @@ import numpy as np
 from tools.paired_stain.data import contained, read_image, sha256
 
 
-def validate(root):
+def validate(root, *, require_same_patient_style=False):
     root = Path(root).resolve()
     path = root/'manifest.json'
     if path.stat().st_size > 8*1024**2:
@@ -60,7 +60,7 @@ def validate(root):
         raise ValueError('Missing independent train/validation domains')
     if len(buckets[('train', 'THO')]) < 2:
         raise ValueError('Need multiple train patients')
-    if buckets[('train', 'THO')] - buckets[('train', 'HE')]:
+    if require_same_patient_style and buckets[('train', 'THO')] - buckets[('train', 'HE')]:
         raise ValueError('B2 needs same-patient TRAIN style availability')
     return doc
 
