@@ -219,3 +219,25 @@ source VM deletion and exact resumed-vs-continuous CPU weights, plus corrupted
 part/sidecar rejection and early exit on missing assignments. These do not
 prove a future Colab runtime will persist. No artificial keepalive or provider
 limit evasion is used. Main training remains separately authorized.
+
+### Foreground publication and a persistent result-part cache
+
+The HTTP contents API was verified on a real CPU runtime to download while a
+foreground cell was still executing (matching SHA, CPU stopped). The configured
+`foreground_worker` uses actual notebook execution of the scientific worker,
+not a detached job or artificial heartbeat. It requires a bounded host archive
+receipt. The worker retains its immutable artifact until receipt and never
+rewrites its parts because a receipt is late. Checkpoint receipts remain
+independent and periodic.
+
+Verified final-result parts persist in `result_cache/<archive-SHA>/` even if a
+later part fails. A bounded transport retry refreshes/checks assignments;
+corruption is rejected and a mismatched artifact is never assembled from an
+older cache. Full size/SHA verification precedes publication and ACK.
+
+`diagnose --compact-controls` preserves unclipped translation/domain-generation
+floats while retaining native PNGs and numerical codec/solver/range controls.
+Original input/reference floats are reproducible from the immutable dataset;
+they need not be transmitted repeatedly. A CPU file/model E2E verifies compact
+mode has identical predicted floats and codec metrics. Compact status is
+explicit in run.json; it does not imply all auxiliary float files are present.

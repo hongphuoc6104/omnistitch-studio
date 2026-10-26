@@ -207,6 +207,64 @@ class RoundTerminalTests(unittest.TestCase):
         run(self.config, runner=runner, interval=0)
         self.assertEqual(len(runner.calls),count)
 
+    def test_failed_final_part_preserves_verified_prefix_in_durable_cache(self):
+        class Interrupted(FakeRunner):
+            def call(self, profile, args, **kwargs):
+                if args[0]=='download' and args[1].endswith('/progress.json'):
+                    self.calls.append(args)
+                    blocks=[b'first block',b'second block',b'last block']
+                    sha=hashlib.sha256(b''.join(blocks)).hexdigest()
+                    Path(args[2]).write_text(json.dumps({'stage':'completed','completed':True,'Drive_backup_verified':True,
+                        'archive_sha256':sha,'archive_bytes':sum(map(len,blocks)),
+                        'parts':[{'name':f'result_part_{i:03d}','bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()} for i,b in enumerate(blocks)]}))
+                    return 0,''
+                if args[0]=='download' and '/result_part_' in args[1]:
+                    self.calls.append(args)
+                    index=int(args[1].rsplit('_',1)[1])
+                    if index==2:raise RuntimeError('fixture final part unavailable')
+                    Path(args[2]).write_bytes([b'first block',b'second block'][index]);return 0,''
+                if args[0]=='sessions':
+                    self.calls.append(args);return 0,'fixture session still assigned'
+                return super().call(profile,args,**kwargs)
+        runner=Interrupted()
+        with self.assertRaisesRegex(RuntimeError,'final part'):
+            run(self.config,runner=runner,interval=0)
+        cache=list((self.root/'result_cache').rglob('result_part_*'))
+        self.assertEqual(len(cache),2,'Verified parts must survive an interrupted collection')
+        self.assertEqual({p.read_bytes() for p in cache},{b'first block',b'second block'})
+
+    def test_foreground_launch_is_supervised_until_archive_receipt(self):
+        class Process:
+            returncode=None
+            def poll(self):return self.returncode
+            def wait(self,timeout=None):
+                if self.returncode is None:raise subprocess.TimeoutExpired('fixture foreground',timeout)
+                return self.returncode
+            def terminate(self):self.returncode=-15
+            def kill(self):self.returncode=-9
+        class Foreground(FakeRunner):
+            def start_execution(self,profile,args,output):
+                self.calls.append(['start_execution',*args])
+                self.code=Path(args[args.index('--file')+1]).read_text()
+                compile(self.code,'<generated notebook launcher>','exec')
+                self.process=Process()
+                return self.process
+            def call(self,profile,args,**kwargs):
+                result=super().call(profile,args,**kwargs)
+                if args[0]=='upload' and args[2].endswith('/archive_ack.json'):
+                    self.receipt=json.loads(Path(args[1]).read_text())
+                    self.process.returncode=0
+                return result
+        cfg=json.loads(self.config.read_text());cfg.update(foreground_worker=True,require_archive_receipt=True)
+        self.config.write_text(json.dumps(cfg))
+        runner=Foreground();result=run(self.config,runner=runner,interval=0)
+        self.assertTrue(result['local_archive_verified'])
+        self.assertEqual(runner.receipt['archive_sha256'],result['archive_sha256'])
+        self.assertIn('subprocess.run',runner.code)
+        self.assertNotIn('child=subprocess.Popen',runner.code)
+        self.assertEqual(runner.process.poll(),0)
+        self.assertEqual(result['foreground_execution_returncode'],0)
+
 
 if __name__ == '__main__':
     unittest.main()

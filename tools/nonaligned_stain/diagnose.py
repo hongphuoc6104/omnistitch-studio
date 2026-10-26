@@ -60,6 +60,9 @@ def diagnose(args):
               'synthetic_fixture': smoke, 'evaluation_precision': 'fp32',
               'GPU': torch.cuda.get_device_name(0) if not smoke else None,
               'completed': False}
+    compact = getattr(args, 'compact_controls', False)
+    status['compact_controls'] = compact
+    status['float_predictions_preserved'] = True
     records, by_patient = [], defaultdict(list)
 
     def tick(stage):
@@ -78,7 +81,8 @@ def diagnose(args):
         array = value.detach()[0].permute(1, 2, 0).float().cpu().numpy()
         if array.shape != (size, size, 3) or not np.isfinite(array).all():
             raise RuntimeError('Nonfinite or resized diagnostic image')
-        np.save(folder/(name+'.npy'), array)
+        if not compact or folder.name in ('predictions', 'domain_samples'):
+            np.save(folder/(name+'.npy'), array)
         Image.fromarray(np.rint(np.clip(array, 0, 1)*255).astype('uint8')).save(folder/(name+'.png'))
         return float(((value < 0) | (value > 1)).float().mean())
 
@@ -163,9 +167,10 @@ def diagnose(args):
                     z = encode(rgb)
                     if row['split'] == 'validation':
                         reconstructed = decode(z)
-                        image('codec', f'{i:03d}', reconstructed)
+                        codec_range = image('codec', f'{i:03d}', reconstructed)
                         codec.append({'file': row['file'], 'patient_id': row['patient_id'], 'domain': row['domain'],
                                       'same_image_MAE': float((reconstructed-rgb).abs().mean()),
+                                      'out_of_range_RGB_elements': codec_range,
                                       'latent_mean_channels': z.mean((0, 2, 3)).cpu().tolist(),
                                       'latent_std_channels': z.std((0, 2, 3), unbiased=False).cpu().tolist()})
                     generator = torch.Generator(device=device).manual_seed(7300+i)
@@ -194,12 +199,13 @@ def diagnose(args):
                         back = bridge.transport(networks['HE'], stained, reverse=True, steps=steps)
                         cycle = bridge.transport(networks['THO'], back, steps=steps)
                         prefix = f'{i:02d}_{steps}'
+                        ranges = {}
                         for name, value in [('same', same), ('cross', stained), ('cycle', cycle)]:
-                            image('solver', prefix+'_'+name, decode(value))
+                            ranges[name+'_out_of_range_RGB_elements'] = image('solver', prefix+'_'+name, decode(value))
                         controls.append({'file': row['file'], 'patient_id': row['patient_id'], 'steps_each_direction': steps,
                                          'same_latent_MAE': float((same-z).abs().mean()),
                                          'cycle_latent_MAE_not_anatomy': float((cycle-z).abs().mean()),
-                                         'inverted_mean': float(latent.mean()), 'inverted_std': float(latent.std())})
+                                         'inverted_mean': float(latent.mean()), 'inverted_std': float(latent.std()), **ranges})
                         write_json(out/'solver.json', controls)
                 for domain in ('THO', 'HE'):
                     for seed in range(4100, 4102 if smoke else 4116):
@@ -241,4 +247,5 @@ if __name__ == '__main__':
     parser.add_argument('--vae-cache')
     parser.add_argument('--seconds', type=int, default=900)
     parser.add_argument('--technical-smoke', action='store_true')
+    parser.add_argument('--compact-controls', action='store_true')
     diagnose(parser.parse_args())

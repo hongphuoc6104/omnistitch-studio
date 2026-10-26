@@ -42,6 +42,11 @@ def bundle_code(repo, destination):
 
 
 class BoundedRunner(Runner):
+    def start_execution(self, profile, args, output):
+        with Path(output).open('ab') as log:
+            return subprocess.Popen([self.cli, profile, *args], stdout=log,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+
     def call(self, profile, args, *, interactive=False, required=True):
         if not interactive:
             return super().call(profile, args, required=required)
@@ -69,6 +74,9 @@ def run(config_path, *, runner=None, interval=5):
     minimum = cfg.get('minimum_work_seconds', 2700)
     if type(reserve) is not int or not 120 <= reserve <= 1800 or type(minimum) is not int or not 600 <= minimum <= 2700:
         raise ValueError('Invalid per-phase time reserve')
+    foreground = cfg.get('foreground_worker', False)
+    if foreground and cfg.get('require_archive_receipt') is not True:
+        raise ValueError('Foreground execution requires bounded archive receipt')
     local_allowed = mode == 'local_parts' and cfg.get('allow_local_verified_completion') is True
     if mode == 'local_parts':
         if not local_allowed:
@@ -114,6 +122,7 @@ def run(config_path, *, runner=None, interval=5):
                  'main_training': False, 'completed': False, 'bundle_sha256': cfg['bundle_sha256'],
                  'job_fingerprint': fingerprint, 'input_transport': mode, 'remote_root': remote}
         created = False
+        execution = None
 
         def persist():
             text = json.dumps(state, indent=2)+'\n'
@@ -124,28 +133,55 @@ def run(config_path, *, runner=None, interval=5):
 
         def collect(progress):
             parts = progress['parts']
-            if not 1 <= len(parts) <= 256 or sum(p['bytes'] for p in parts) != progress['archive_bytes']:
+            sha = progress['archive_sha256']
+            if (not re.fullmatch('[0-9a-f]{64}', sha) or not 0 < progress['archive_bytes'] <= 2*1024**3
+                    or not 1 <= len(parts) <= 256 or sum(p['bytes'] for p in parts) != progress['archive_bytes']):
                 raise ValueError('Invalid output transfer manifest')
             target = base/'round2.tar.gz'
-            # Failed-attempt evidence is retained under its attempt directory.
             if progress['stage'] == 'failed':
                 target = attempt/'failed_round2.tar.gz'
-            with tempfile.TemporaryDirectory(dir=attempt) as temp:
-                temp = Path(temp)
-                archive = temp/'archive'
-                with archive.open('wb') as dst:
-                    for i, part in enumerate(parts):
-                        if part['name'] != f'result_part_{i:03d}' or not 0 < part['bytes'] <= 8*1024**2:
-                            raise ValueError('Unsafe result part')
+            cache = base/'result_cache'/sha
+            cache.mkdir(parents=True, exist_ok=True)
+            if not cache.resolve().is_relative_to(base.resolve()):
+                raise ValueError('Result cache path escape')
+            for i, part in enumerate(parts):
+                if (part['name'] != f'result_part_{i:03d}' or not 0 < part['bytes'] <= 8*1024**2
+                        or not re.fullmatch('[0-9a-f]{64}', part['sha256'])):
+                    raise ValueError('Unsafe result part')
+                saved = cache/part['name']
+                if saved.is_symlink():
+                    raise ValueError('Unsafe result cache link')
+                if saved.is_file() and saved.stat().st_size == part['bytes'] and digest(saved) == part['sha256']:
+                    continue
+                for retry in range(2):
+                    try:
                         if time.monotonic() >= end:
                             raise TimeoutError('Result transfer exceeded total GPU deadline')
-                        local = temp/'part'
-                        runner.call(profile, ['download', remote+'/'+part['name'], str(local), '--session', name])
-                        if local.stat().st_size != part['bytes'] or digest(local) != part['sha256']:
-                            raise ValueError('Result part checksum mismatch')
-                        with local.open('rb') as src:
-                            shutil.copyfileobj(src, dst, 1024*1024)
-                if digest(archive) != progress['archive_sha256']:
+                        with tempfile.TemporaryDirectory(dir=cache) as temp:
+                            local = Path(temp)/'part'
+                            runner.call(profile, ['download', remote+'/'+part['name'], str(local), '--session', name])
+                            if local.stat().st_size != part['bytes'] or digest(local) != part['sha256']:
+                                raise ValueError('Result part checksum mismatch')
+                            local.replace(saved)
+                        state['verified_result_parts'] = i+1
+                        state['result_parts_expected'] = len(parts)
+                        persist()
+                        break
+                    except (RuntimeError, subprocess.TimeoutExpired):
+                        if retry:
+                            raise
+                        _, assignments = runner.call(profile, ['sessions'], required=False)
+                        if 'No active sessions found' in assignments:
+                            state['runtime_missing_verified'] = True
+                            raise RuntimeError('Owned runtime no longer assigned during result transfer')
+                        time.sleep(1)
+            with tempfile.TemporaryDirectory(dir=attempt) as temp:
+                archive = Path(temp)/'archive'
+                with archive.open('wb') as output:
+                    for part in parts:
+                        with (cache/part['name']).open('rb') as source:
+                            shutil.copyfileobj(source, output, 1024*1024)
+                if digest(archive) != sha:
                     raise ValueError('Complete result checksum mismatch')
                 os.link(archive, target)
             return str(target)
@@ -204,6 +240,17 @@ def run(config_path, *, runner=None, interval=5):
                 for local, filename in [(base/'code.tar.gz', 'code.tar.gz'), (remote_cfg, 'config.json')]:
                     runner.call(profile, ['upload', str(local), remote+'/'+filename, '--session', name])
                 launcher = temp/'launch.py'
+                if foreground:
+                    tail = """print('ROUND2_WORKER_STARTED',flush=True)
+with (root/'worker.log').open('ab') as log:
+ subprocess.run([sys.executable,'-u','-m','tools.nonaligned_stain.round_worker','--root',str(root)],cwd=dst,stdout=log,stderr=subprocess.STDOUT,check=True)
+print('ROUND2_WORKER_FINISHED',flush=True)
+"""
+                else:
+                    tail = """with (root/'worker.log').open('ab') as log:
+ child=subprocess.Popen([sys.executable,'-u','-m','tools.nonaligned_stain.round_worker','--root',str(root)],cwd=dst,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+print('ROUND2_WORKER_STARTED',child.pid)
+"""
                 launcher.write_text(f'''import hashlib,json,tarfile,subprocess,sys,shutil
 from pathlib import Path
 root=Path({remote!r});cfg=json.loads((root/'config.json').read_text())
@@ -218,13 +265,16 @@ with tarfile.open(root/'code.tar.gz') as tar:
   content=tar.extractfile(m).read()
   assert hashlib.sha256(content).hexdigest()==cfg['code_files'][m.name]
   target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(content)
-with (root/'worker.log').open('ab') as log:
- child=subprocess.Popen([sys.executable,'-u','-m','tools.nonaligned_stain.round_worker','--root',str(root)],cwd=dst,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-print('ROUND2_WORKER_STARTED',child.pid)
+{tail}
 ''')
-                _, result = runner.call(profile, ['exec', '--session', name, '--file', str(launcher), '--timeout', '30'])
-                if 'ROUND2_WORKER_STARTED' not in result:
-                    raise RuntimeError('Worker launch marker missing')
+                if foreground:
+                    execution = runner.start_execution(profile, ['exec', '--session', name, '--file', str(launcher),
+                                                                '--timeout', str(max(1, int(end-time.monotonic())))],
+                                                       attempt/'foreground_execution.log')
+                else:
+                    _, result = runner.call(profile, ['exec', '--session', name, '--file', str(launcher), '--timeout', '30'])
+                    if 'ROUND2_WORKER_STARTED' not in result:
+                        raise RuntimeError('Worker launch marker missing')
                 state['launched'] = True
                 persist()
                 last = None
@@ -258,6 +308,7 @@ print('ROUND2_WORKER_STARTED',child.pid)
                             state.update(progress)
                             if progress.get('parts'):
                                 state['local_archive'] = collect(progress)
+                                state['local_archive_verified'] = True
                             persist()
                             if stage == 'failed':
                                 raise RuntimeError(progress.get('error', 'Research worker failed'))
@@ -268,6 +319,16 @@ print('ROUND2_WORKER_STARTED',child.pid)
                             if state['Drive_backup_pending']:
                                 state['stage'] = 'completed_local_Drive_pending'
                             persist()
+                            if cfg.get('require_archive_receipt'):
+                                ack = temp/'archive_ack.json'
+                                ack.write_text(json.dumps({'archive_sha256':progress['archive_sha256'],
+                                                           'archive_bytes':progress['archive_bytes'],
+                                                           'verified_local':True})+'\n')
+                                runner.call(profile, ['upload',str(ack),remote+'/archive_ack.json','--session',name])
+                            if execution is not None:
+                                execution.wait(timeout=15)
+                                state['foreground_execution_returncode'] = execution.returncode
+                                persist()
                             break
                         persist()
                     else:
@@ -284,6 +345,13 @@ print('ROUND2_WORKER_STARTED',child.pid)
             state['error'] = scrub(type(error).__name__+': '+str(error))
             raise
         finally:
+            if execution is not None and execution.poll() is None:
+                execution.terminate()
+                try:
+                    execution.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    execution.kill()
+                    execution.wait(timeout=5)
             if created:
                 try:
                     runner.call(profile, ['download', remote+'/worker.log', str(attempt/'worker.log'), '--session', name], required=False)

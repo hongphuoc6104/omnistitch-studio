@@ -283,6 +283,25 @@ class NonalignedTorchTests(unittest.TestCase):
         self.assertLess(terminal_errors[-1], terminal_errors[0])
         self.assertTrue(all(np.isfinite(errors+terminal_errors)))
 
+    def test_compact_diagnostics_keep_prediction_floats_and_same_numeric_controls(self):
+        from tools.nonaligned_stain.train import train
+        from tools.nonaligned_stain.diagnose import diagnose
+        with tempfile.TemporaryDirectory(dir=self.base) as temp:
+            base=Path(temp);root=base/'data';fixture(root)
+            train(self.args(root,base/'train','C2',1))
+            checkpoint=base/'train/checkpoint.pt'
+            args=argparse.Namespace(dataset=str(root),assets=str(self.assets),vae_cache=None,branch='C2',
+                 checkpoint=str(checkpoint),checkpoint_sha256=data.sha256(checkpoint),seconds=60,
+                 technical_smoke=True,output=str(base/'full'))
+            full=diagnose(args)
+            args.output=str(base/'compact');args.compact_controls=True
+            compact=diagnose(args)
+            self.assertEqual(full['codec_records'],compact['codec_records'])
+            self.assertTrue(np.array_equal(np.load(base/'full/predictions/000.npy'),np.load(base/'compact/predictions/000.npy')))
+            self.assertEqual(json.loads((base/'full/codec.json').read_text()),json.loads((base/'compact/codec.json').read_text()))
+            self.assertFalse(list((base/'compact/codec').glob('*.npy')))
+            self.assertEqual(len(list((base/'compact/domain_samples').glob('*.npy'))),4)
+
 
 if __name__ == '__main__':
     unittest.main()

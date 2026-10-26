@@ -146,6 +146,7 @@ def run(root):
     output.mkdir(exist_ok=False)
     deadline = time.time()+cfg['remaining_seconds']
     child = None
+    final_artifact = None
     state = {'completed': False, 'main_training': False, 'input_dataset_sha256': cfg['dataset_sha256']}
 
     def progress(stage, **kwargs):
@@ -256,7 +257,7 @@ def run(root):
             call('tools.nonaligned_stain.diagnose', '--dataset', dataset, '--checkpoint', root/'inputs'/(branch+'.pt'),
                  '--checkpoint-sha256', cfg['archives'][branch]['checkpoint_sha256'], '--branch', branch,
                  '--assets', root/'assets', '--vae-cache', root/'vae', '--output', output/(branch+'_diagnostic'),
-                 '--seconds', seconds, seconds=seconds)
+                 '--seconds', seconds, *(['--compact-controls'] if cfg.get('compact_controls') else []), seconds=seconds)
         defaults = {'CX': 1., 'source_self_similarity': 10., 'palette': 5., 'same_HE_identity': 5., 'range': .1}
         experiments = [('B3-0', defaults), ('B3-S', dict(defaults, source_self_similarity=1.)),
                        ('B3-I', dict(defaults, same_HE_identity=.5))]
@@ -323,14 +324,29 @@ def run(root):
             'main_training_started': False, 'reason': 'Review diagnostic images before choosing confirmation or C3 intervention.'}, indent=2)+'\n')
         progress('archiving')
         result = archive_results(root, cfg)
+        final_artifact = result
         progress('completed', completed=True, **result)
+        if cfg.get('require_archive_receipt'):
+            receipt_seconds = cfg.get('transfer_reserve_seconds', 600)
+            if type(receipt_seconds) is not int or not 120 <= receipt_seconds <= 1800:
+                raise ValueError('Invalid archive receipt deadline')
+            ack = root/'archive_ack.json'
+            ack_end = time.monotonic()+receipt_seconds
+            while not ack.is_file() and time.monotonic() < ack_end:
+                time.sleep(1)
+            if (not ack.is_file() or json.loads(ack.read_text()).get('archive_sha256') != result['archive_sha256']
+                    or json.loads(ack.read_text()).get('archive_bytes') != result['archive_bytes']):
+                raise RuntimeError('Host archive receipt not received within delivery budget')
     except BaseException as error:
         stop_child(child)
         failure = type(error).__name__+': '+str(error)
-        try:
-            result = archive_results(root, cfg, failed=True)
-        except BaseException as backup_error:
-            result = {'backup_error': type(backup_error).__name__+': '+str(backup_error)}
+        if final_artifact is not None:
+            result = final_artifact  # Never overwrite parts while the host may still receive them.
+        else:
+            try:
+                result = archive_results(root, cfg, failed=True)
+            except BaseException as backup_error:
+                result = {'backup_error': type(backup_error).__name__+': '+str(backup_error)}
         # Write directly: a deadline must not hide the error/evidence state.
         state.update(stage='failed', error=failure, **result)
         (root/'progress.json').write_text(json.dumps(state, indent=2)+'\n')
