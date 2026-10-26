@@ -262,6 +262,22 @@ class PairedTorchTests(unittest.TestCase):
                 self.assertEqual(a['step'], b['step'])
                 self.assertTrue(all(torch.equal(a['model'][k], b['model'][k]) for k in a['model']))
 
+    def test_time_capped_training_reserves_heldout_evaluation(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from tools.paired_stain.train import train
+        ticks = iter(i*.03 for i in range(1000))
+        with tempfile.TemporaryDirectory(dir=self.base) as temp:
+            base = Path(temp)
+            root = base/'data'
+            fixture(root)
+            args = self.arguments(root, base/'timed', 'B', 8)
+            args.seconds = 1
+            with patch('tools.paired_stain.train.time', SimpleNamespace(monotonic=lambda: next(ticks))):
+                run = train(args)
+            self.assertLess(run['final_step'], 8)
+            self.assertGreaterEqual(run['validation_predictions'], 1)
+
     def test_dit_condition_receives_gradient_and_changes_output(self):
         import torch
         torch.set_num_threads(1)

@@ -84,6 +84,8 @@ def train(args):
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
+    evaluation_reserve = min(180., max(.25, args.seconds*.2))
+    training_seconds = args.seconds - evaluation_reserve
     size = data.read_image(root, dataset['records'][0]['THO'], 'RGB').shape[0]
     model = models.build(args.branch, size, args.assets, tiny=smoke).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=.01)
@@ -121,6 +123,8 @@ def train(args):
            'torch': torch.__version__, 'test_used': False, 'synthetic_codec': smoke and args.branch == 'C',
            'scientific_training_result': False, 'records': len(dataset['records']),
            'validation_ids': [r['id'] for r in validation], 'initial_step': step,
+           'training_budget_seconds': training_seconds,
+           'evaluation_reserve_seconds': evaluation_reserve,
            'scope': 'project adaptation; technical feasibility, not validated virtual staining'}
     write_json(output/'run.json', run)
 
@@ -183,7 +187,7 @@ def train(args):
 
     durations, losses = [], []
     with (output/'loss.jsonl').open('w') as log:
-        while step < args.steps and time.monotonic()-start < args.seconds:
+        while step < args.steps and time.monotonic()-start < training_seconds:
             before = time.monotonic()
             before_rng = rng_state(torch)
             optimizer.zero_grad(set_to_none=True)
@@ -209,7 +213,7 @@ def train(args):
                     raise RuntimeError('Nonfinite training loss')
                 scaler.scale(loss/args.accumulation).backward()
                 value += float(loss.detach())/args.accumulation
-            if time.monotonic()-start >= args.seconds:
+            if time.monotonic()-start >= training_seconds:
                 optimizer.zero_grad(set_to_none=True)
                 restore_rng(torch, before_rng)
                 break

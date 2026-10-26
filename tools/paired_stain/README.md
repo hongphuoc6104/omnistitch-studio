@@ -107,10 +107,11 @@ python -m tools.paired_stain.train --branch C --dataset /private/new_release \
 All data gates run before GPU/model allocation. Real-data CPU training is
 refused. Each run uses microbatch 1, patient-balanced sampling, accumulation 4,
 AdamW 1e-4, FP16 with scaling, finite-gradient checks, no test images and a
-45-minute/1000-update ceiling. An in-progress update that passes the deadline
-is discarded before the optimizer step. Final validation shares that wall
-budget, so late runs may have fewer/no validation predictions; inspect actual
-counts rather than declaring completion of evaluation. Individual CUDA kernels
+45-minute/1000-update ceiling. Up to three minutes (20% for shorter runs) is
+reserved for held-out evaluation within the same total budget. An in-progress
+update that passes the training deadline is discarded before the optimizer
+step. Inspect actual validation counts: unexpected setup/I/O delays can still
+reduce coverage within the hard total deadline. Individual CUDA kernels
 cannot be preempted by a Python deadline. Use a runtime/controller watchdog and
 allow a short checkpoint/copy grace period.
 
