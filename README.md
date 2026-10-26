@@ -228,3 +228,8 @@ The [Colab native collector](docs/COLAB_NATIVE.md) extracts lossless RGB/capture
 windows from checksummed original mosaics on CPU, keeps full native coordinates,
 and returns only the requested regions for review. Search windows do not imply
 anatomical correspondence or training acceptance.
+
+Two guarded paired-stain research pilots (scale-1 SwinIR and a small conditional
+latent DiT), explicit release/codec gates, checkpoint resume and CPU E2E:
+[paired 4X readiness](tools/paired_stain/README.md). Candidate images do not
+become positive pairs merely because the training code is available.
