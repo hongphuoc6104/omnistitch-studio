@@ -184,6 +184,105 @@ class NonalignedTorchTests(unittest.TestCase):
                 for key in ('models', 'ema'):
                     self.assertTrue(all(torch.equal(x[key][n][k], y[key][n][k]) for n in x[key] for k in x[key][n]))
 
+    def test_train_weights_seed_full_evaluation_and_nonmutating_gradient_probe(self):
+        import torch
+        from tools.nonaligned_stain.train import train
+        from tools.nonaligned_stain.objectives import DEFAULT_WEIGHTS
+        with tempfile.TemporaryDirectory(dir=self.base) as temp:
+            base = Path(temp)
+            root = base/'data'
+            doc = fixture(root)
+            template = dict(doc['records'][-2])
+            for i in range(5):
+                rgb = np.random.default_rng(100+i).integers(10, 240, (32, 32, 3), dtype=np.uint8)
+                path = root/f'val_extra_{i}.png'
+                Image.fromarray(rgb).save(path)
+                doc['records'].append(dict(template, file=path.name, sha256=data.sha256(path),
+                                           pixel_sha256=hashlib.sha256(rgb.tobytes()).hexdigest(),
+                                           source_sha256=data.sha256(path)))
+            (root/'manifest.json').write_text(json.dumps(doc))
+            weights = dict(DEFAULT_WEIGHTS, source_self_similarity=1.)
+            for name, diagnostic in [('plain', False), ('probed', True)]:
+                args = self.args(root, base/name, 'B2')
+                args.seed, args.loss_weights, args.gradient_diagnostics, args.eval_all = 123, weights, diagnostic, True
+                result = train(args)
+                self.assertEqual(result['final_validation_predictions'], 6)
+                self.assertEqual(result['config']['seed'], 123)
+                self.assertEqual(result['config']['B2_loss_weights'], weights)
+                first = json.loads((base/name/'loss.jsonl').read_text().splitlines()[0])
+                self.assertAlmostEqual(first['total'], sum(weights[k]*first[k] for k in weights), places=5)
+            plain = torch.load(base/'plain/checkpoint.pt', weights_only=False)
+            probed = torch.load(base/'probed/checkpoint.pt', weights_only=False)
+            self.assertTrue(all(torch.equal(plain['models']['B2'][k], probed['models']['B2'][k])
+                                for k in plain['models']['B2']))
+            profile = json.loads((base/'probed/gradient_0000.json').read_text())
+            self.assertEqual(profile['optimizer_updates'], 0)
+            self.assertEqual(profile['terms']['palette']['weighted_gradient_norm']['shared_first_conv'], 0.)
+            self.assertGreater(profile['terms']['palette']['weighted_gradient_norm']['residual_head'], 0.)
+            args = self.args(root, base/'bad_resume', 'B2', 3, str(base/'probed/checkpoint.pt'))
+            args.seed, args.loss_weights, args.gradient_diagnostics, args.eval_all = 124, weights, True, True
+            with self.assertRaisesRegex(ValueError, 'Resume identity'):
+                train(args)
+            args = self.args(root, base/'invalid', 'B2')
+            args.loss_weights = dict(weights, palette=float('nan'))
+            with self.assertRaisesRegex(ValueError, 'weights'):
+                train(args)
+
+    def test_file_checkpoint_to_complete_diagnostics_without_optimizer(self):
+        import torch
+        from tools.nonaligned_stain.train import train
+        from tools.nonaligned_stain.diagnose import diagnose
+        with tempfile.TemporaryDirectory(dir=self.base) as temp:
+            base = Path(temp)
+            root = base/'data'
+            fixture(root)
+            for branch in ('B2', 'C2'):
+                train(self.args(root, base/branch, branch, 1))
+                checkpoint = base/branch/'checkpoint.pt'
+                before = data.sha256(checkpoint)
+                args = argparse.Namespace(dataset=str(root), output=str(base/(branch+'_diagnostic')),
+                                          assets=str(self.assets), vae_cache=None, branch=branch,
+                                          checkpoint=str(checkpoint), checkpoint_sha256=before,
+                                          seconds=60, technical_smoke=True)
+                result = diagnose(args)
+                self.assertTrue(result['completed'])
+                self.assertEqual(result['optimizer_updates'], 0)
+                self.assertEqual(result['THO_predictions'], 1)
+                self.assertEqual(before, data.sha256(checkpoint))
+                if branch == 'C2':
+                    self.assertEqual(result['codec_records'], 2)
+                    self.assertEqual(result['denoising_records'], 36)
+                    self.assertEqual(result['solver_records'], 2)
+                    entries = json.loads((Path(args.output)/'denoising.json').read_text())
+                    self.assertEqual({r['split'] for r in entries}, {'train', 'validation'})
+                    self.assertTrue(all(np.isfinite(r['epsilon_MSE']) for r in entries))
+                args.output = str(base/(branch+'_untrusted'))
+                args.checkpoint_sha256 = '0'*64
+                with self.assertRaisesRegex(ValueError, 'Untrusted checkpoint'):
+                    diagnose(args)
+                self.assertFalse(Path(args.output).exists())
+
+    def test_gaussian_score_control_improves_with_solver_resolution(self):
+        import torch
+        from tools.nonaligned_stain.bridge import transport
+        from tools.paired_stain.models import schedule
+        class Gaussian(torch.nn.Module):
+            def forward(self, x, t, labels):
+                a = schedule(x.device)[t].reshape(-1, 1, 1, 1)
+                return (1-a).sqrt()*x/(a*.25+1-a)
+        torch.manual_seed(17)
+        source = torch.randn(1, 4, 4, 4)*.5
+        errors, terminal_errors = [], []
+        terminal_variance = schedule(source.device)[-1]*.25+1-schedule(source.device)[-1]
+        for steps in (25, 50, 100):
+            latent = transport(Gaussian(), source, reverse=True, steps=steps)
+            result = transport(Gaussian(), latent, steps=steps)
+            errors.append(float((result-source).abs().mean()))
+            terminal_errors.append(float((latent-source*(terminal_variance/.25).sqrt()).abs().mean()))
+        self.assertLess(errors[-1], errors[0])
+        self.assertLess(terminal_errors[-1], terminal_errors[0])
+        self.assertTrue(all(np.isfinite(errors+terminal_errors)))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -31,6 +31,15 @@ def train(args):
     import torch.nn.functional as F
     from tools.nonaligned_stain import objectives, bridge
 
+    seed = getattr(args, 'seed', 2026)
+    if type(seed) is not int or not 0 <= seed < 2**31:
+        raise ValueError('Invalid experiment seed')
+    weights = objectives.validate_weights(getattr(args, 'loss_weights', None))
+    diagnostics = getattr(args, 'gradient_diagnostics', False)
+    eval_all = getattr(args, 'eval_all', False)
+    if args.branch == 'C2' and (diagnostics or weights != objectives.DEFAULT_WEIGHTS):
+        raise ValueError('B2 objectives cannot be applied to C2')
+
     if not smoke and not torch.cuda.is_available():
         raise RuntimeError('Real-data CPU training refused')
     device = torch.device('cpu' if smoke else 'cuda')
@@ -39,10 +48,10 @@ def train(args):
     # Keep the whole B2 feature/model path FP32; C2 epsilon training uses AMP.
     use_amp = args.branch == 'C2' and device.type == 'cuda'
     torch.set_num_threads(1 if smoke else 2)
-    random.seed(2026)
-    torch.manual_seed(2026)
+    random.seed(seed)
+    torch.manual_seed(seed)
     if device.type == 'cuda':
-        torch.cuda.manual_seed_all(2026)
+        torch.cuda.manual_seed_all(seed)
         torch.cuda.reset_peak_memory_stats()
     root, output, assets = Path(args.dataset).resolve(), Path(args.output).resolve(), Path(args.assets).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -54,9 +63,16 @@ def train(args):
         buckets.setdefault((row['split'], row['domain']), {}).setdefault(row['patient_id'], []).append(row)
     validation = []
     for patient in sorted(buckets[('validation', 'THO')]):
-        validation.extend(sorted(buckets[('validation', 'THO')][patient],
-                                 key=lambda r: r['structured_fraction'], reverse=True)[:4])
-    validation = validation[:12]
+        rows = sorted(buckets[('validation', 'THO')][patient],
+                      key=lambda r: r['structured_fraction'], reverse=True)
+        validation.extend(rows if eval_all else rows[:4])
+    if not eval_all:
+        validation = validation[:12]
+    quick_validation = []
+    for patient in sorted({r['patient_id'] for r in validation}):
+        quick_validation.extend([r for r in validation if r['patient_id'] == patient][:4])
+    quick_validation = quick_validation[:12]
+    quick_indices = {r['file']: i for i, r in enumerate(quick_validation)}
     references = [max(buckets[('train', 'HE')][p], key=lambda r: r['structured_fraction'])
                   for p in sorted(buckets[('train', 'HE')])[:3]]
 
@@ -104,7 +120,9 @@ def train(args):
                 if row['split'] == 'train':
                     latents[row['file']] = encode(tensor(row)).cpu()
         print('TRAIN_ONLY_LATENTS_CACHED', len(latents), flush=True)
-    config = {'branch': args.branch, 'accumulation': args.accumulation, 'seed': 2026, 'size': size,
+    config = {'branch': args.branch, 'accumulation': args.accumulation, 'seed': seed, 'size': size,
+              'B2_loss_weights': weights if args.branch == 'B2' else None,
+              'gradient_diagnostics': diagnostics, 'evaluation_all_THO': eval_all,
               'precision': 'fp16_amp' if use_amp else 'fp32',
               'synthetic_fixture': smoke, 'source_4X_supervision': 'unpaired; no THO-HE pixel loss',
               'SwinIR_revision': models.SWIN_REV, 'DiT_revision': models.DIT_REV,
@@ -141,6 +159,18 @@ def train(args):
                              'normalization': 'official RGB ImageNet mean/std; relu3_1, relu4_1'}
     write_json(output/'run.json', run)
 
+    def profile_gradient():
+        if not diagnostics:
+            return
+        before_rng = rng_state(torch)
+        row = sorted([r for r in doc['records'] if r['split'] == 'train' and r['domain'] == 'THO'],
+                     key=lambda r: (r['patient_id'], r['file']))[0]
+        style = sorted(buckets[('train', 'HE')][row['patient_id']], key=lambda r: r['file'])[0]
+        profile = objectives.gradient_profile(networks['B2'], encoder, tensor(row), tensor(style), weights)
+        profile.update({'step': step, 'source_file': row['file'], 'style_file': style['file']})
+        write_json(output/f'gradient_{step:04d}.json', profile)
+        restore_rng(torch, before_rng)
+
     def save_checkpoint():
         temporary = output/'checkpoint.tmp'
         torch.save({'identity': identity, 'step': step, 'models': {n: m.state_dict() for n, m in networks.items()},
@@ -149,7 +179,7 @@ def train(args):
                     'ema': {n: m.state_dict() for n, m in ema.items()}, 'rng': rng_state(torch)}, temporary)
         temporary.replace(output/'checkpoint.pt')
 
-    def evaluate(label):
+    def evaluate(label, full=False):
         before_rng = rng_state(torch)
         folder = output/label
         folder.mkdir()
@@ -157,11 +187,12 @@ def train(args):
         for network in networks.values():
             network.eval()
         with torch.no_grad():
-            for index, row in enumerate(validation):
+            for index, row in enumerate(validation if full else quick_validation):
                 if time.monotonic()-start >= args.seconds:
                     break
                 original = tensor(row)
-                reference = tensor(references[index % len(references)])
+                reference_row = references[quick_indices.get(row['file'], index) % len(references)]
+                reference = tensor(reference_row)
                 if args.branch == 'B2':
                     prediction = networks['B2'](original)
                     source_std = original.std((2, 3), keepdim=True, unbiased=False).clamp_min(1e-6)
@@ -191,14 +222,14 @@ def train(args):
                     array = value[0].permute(1, 2, 0).float().cpu().numpy()
                     if not np.isfinite(array).all():
                         raise RuntimeError('Nonfinite validation image')
-                    if name != 'HE_train_STYLE':
+                    if name != 'HE_train_STYLE' and (name == 'prediction' or not getattr(args, 'compact_evaluation', False)):
                         np.save(folder/f'{index:02d}_{name}.npy', array)
                     panel.paste(Image.fromarray(np.rint(np.clip(array, 0, 1)*255).astype('uint8')), (column*size, 0))
                 panel.save(folder/f'{index:02d}_panels.png')
                 x, y = original[0].mean(0).cpu().numpy(), prediction[0].mean(0).cpu().numpy()
                 correlation = float(np.corrcoef(x.ravel(), y.ravel())[0, 1]) if x.std() and y.std() else None
                 records.append({'file': row['file'], 'patient_id': row['patient_id'],
-                                'source_sha256': row['sha256'], 'style_train_file': references[index % len(references)]['file'],
+                                'source_sha256': row['sha256'], 'style_train_file': reference_row['file'],
                                 'panel_order': [name for name, _ in panels], 'grayscale_correlation_not_anatomy': correlation,
                                 'prediction_clipped_fraction': float(((prediction < 0) | (prediction > 1)).float().mean()),
                                 **numerical})
@@ -209,6 +240,7 @@ def train(args):
         print('NONALIGNED_EVAL', label, len(records), flush=True)
         return records
 
+    profile_gradient()
     initial = evaluate('step_0000')
     history = []
     alpha = models.schedule(device)
@@ -224,7 +256,7 @@ def train(args):
                     row = sample('THO')
                     source, style = tensor(row), tensor(sample('HE', row['patient_id']))
                     with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-                        loss, terms = objectives.b2_loss(networks['B2'], encoder, source, style)
+                        loss, terms = objectives.b2_loss(networks['B2'], encoder, source, style, weights)
                     terms['total'] = loss
                     if not torch.isfinite(loss):
                         raise RuntimeError('Nonfinite B2 loss')
@@ -269,11 +301,15 @@ def train(args):
             log.write(json.dumps(metrics)+'\n')
             log.flush()
             history.append(metrics)
+            if step in (20, 100, 400):
+                profile_gradient()
             if step % 100 == 0:
                 save_checkpoint()
                 print('NONALIGNED_TRAIN', args.branch, step, json.dumps(metrics), flush=True)
+            if step in (100, 400) and step < args.steps:
+                evaluate(f'step_{step:04d}_intermediate')
     save_checkpoint()
-    final = evaluate(f'step_{step:04d}_final')
+    final = evaluate(f'step_{step:04d}_final', full=True)
     run.update({'final_step': step, 'updates_this_run': len(history), 'final_validation_predictions': len(final),
                 'initial_validation_predictions': len(initial), 'wall_seconds': time.monotonic()-start,
                 'peak_cuda_bytes': torch.cuda.max_memory_allocated() if not smoke else 0,
@@ -296,6 +332,11 @@ def main():
     parser.add_argument('--seconds', type=int, default=900)
     parser.add_argument('--accumulation', type=int, default=1)
     parser.add_argument('--resume')
+    parser.add_argument('--seed', type=int, default=2026)
+    parser.add_argument('--loss-weights', type=json.loads)
+    parser.add_argument('--gradient-diagnostics', action='store_true')
+    parser.add_argument('--eval-all', action='store_true')
+    parser.add_argument('--compact-evaluation', action='store_true')
     parser.add_argument('--technical-smoke', action='store_true')
     train(parser.parse_args())
 

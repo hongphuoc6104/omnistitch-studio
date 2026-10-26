@@ -7,6 +7,20 @@ author implementation or a proven histology objective.
 import torch
 import torch.nn.functional as F
 
+DEFAULT_WEIGHTS = {'CX': 1., 'source_self_similarity': 10., 'palette': 5.,
+                   'same_HE_identity': 5., 'range': .1}
+
+
+def validate_weights(weights=None):
+    """Explicit bounded experiment coefficients, never an implicit loss change."""
+    import math
+    result = dict(DEFAULT_WEIGHTS if weights is None else weights)
+    if (result.keys() != DEFAULT_WEIGHTS.keys()
+            or any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 100
+                   for v in result.values()) or not any(result.values())):
+        raise ValueError('Invalid B2 loss weights')
+    return result
+
 
 def tokens(feature, side=16):
     if feature.ndim != 4 or not 1 <= side <= 16:
@@ -66,7 +80,7 @@ class Features(torch.nn.Module):
         return result
 
 
-def b2_loss(model, encoder, source, style):
+def b2_terms(model, encoder, source, style):
     prediction = model(source)
     features = encoder(prediction)
     with torch.no_grad():
@@ -79,6 +93,43 @@ def b2_loss(model, encoder, source, style):
         color = palette(prediction.float(), style.float())
         identity = F.l1_loss(identity_image.float(), style.float())
         range_penalty = (F.relu(-prediction.float())+F.relu(prediction.float()-1)).mean()
-    total = cx+10*structure+5*color+5*identity+.1*range_penalty
-    return total, {'CX': cx, 'source_self_similarity': structure,
-                   'palette': color, 'same_HE_identity': identity, 'range': range_penalty}
+    return prediction, {'CX': cx, 'source_self_similarity': structure,
+                        'palette': color, 'same_HE_identity': identity, 'range': range_penalty}
+
+
+def b2_loss(model, encoder, source, style, weights=None):
+    weights = validate_weights(weights)
+    _, terms = b2_terms(model, encoder, source, style)
+    return sum(weights[k]*v for k, v in terms.items()), terms
+
+
+def gradient_profile(model, encoder, source, style, weights=None):
+    """Probe TRAIN gradients without updating parameters or populating .grad.
+
+    Output gradients exclude the separate HE identity forward by construction;
+    head/shared-parameter gradients include it. Zero-init head can make the
+    first shared gradient zero. Cosines with zero vectors are explicitly null.
+    """
+    weights = validate_weights(weights)
+    prediction, terms = b2_terms(model, encoder, source, style)
+    probes = [prediction, model.conv_last.weight, model.conv_first.weight]
+    names = ['prediction', 'residual_head', 'shared_first_conv']
+    vectors, result = {}, {}
+    for key, value in terms.items():
+        grads = torch.autograd.grad(value*weights[key], probes, retain_graph=True, allow_unused=True)
+        vectors[key] = [torch.zeros_like(p).flatten() if g is None else g.detach().flatten()
+                        for p, g in zip(probes, grads)]
+        if any(not torch.isfinite(g).all() for g in vectors[key]):
+            raise RuntimeError('Nonfinite diagnostic gradient')
+        result[key] = {'raw_loss': float(value.detach()), 'weight': weights[key],
+                       'weighted_gradient_norm': {n: float(g.norm()) for n, g in zip(names, vectors[key])}}
+    cosines = {}
+    keys = list(terms)
+    for i, a in enumerate(keys):
+        for b in keys[i+1:]:
+            cosines[a+'__'+b] = {}
+            for n, x, y in zip(names, vectors[a], vectors[b]):
+                denominator = float(x.norm()*y.norm())
+                cosines[a+'__'+b][n] = float(torch.dot(x, y))/denominator if denominator > 0 else None
+    return {'terms': result, 'weighted_gradient_cosines': cosines,
+            'optimizer_updates': 0, 'inputs_are_TRAIN': True}

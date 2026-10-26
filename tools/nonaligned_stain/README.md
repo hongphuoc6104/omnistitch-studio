@@ -109,3 +109,59 @@ optimizer/scaler, completed steps, RNG and data/code identity. Resume trusted
 private checkpoints with `--resume` into a new output directory. A controller
 must copy verified checkpoints/results to Drive and stop only owned runtimes.
 No long training run should be inferred from a successful synthetic test.
+
+## Round 2: bounded diagnostics and B3 ablations
+
+The existing source dataset remains unpaired. New experiment options are
+`--seed`, a complete JSON `--loss-weights` mapping, `--gradient-diagnostics`,
+`--eval-all` and `--compact-evaluation`. Defaults retain the original loss
+coefficients. Seed, coefficients and diagnostic/evaluation policy are recorded
+in checkpoint identity; changing the learning configuration is not resume.
+B2 remains fully FP32. Probes at steps 0/20/100/400 measure weighted gradients
+at the prediction, residual head and first shared convolution without optimizer
+updates. The separate HE identity forward has no gradient with respect to the
+THÔ prediction, but does have gradients through shared model parameters.
+A zero-initialized residual head blocks upstream gradients initially; the
+probe reports that fact instead of treating it as a failed training step.
+
+Initial/intermediate image checks use the fixed quick set. `--eval-all` writes
+final predictions for all held-out THÔ crops, preserving the quick-set TRAIN
+style references. Compact mode retains float predictions and viewing panels;
+source images remain recoverable by immutable dataset file/hash identities.
+
+`python -m tools.nonaligned_stain.diagnose --help` evaluates a trusted private
+checkpoint without any optimizer. An explicit checkpoint SHA, matching native
+release and pinned backbone/codec revisions are required. It retains all THÔ
+outputs and patient-level summaries. C2 additionally evaluates codec round trips
+on both validation domains, fixed-noise epsilon prediction on separate TRAIN
+and validation records, same-domain/cross-domain/cycle controls at 25/50/100
+steps, and 16 predefined Gaussian seeds per domain. Generated marginal images
+have no corresponding observed target. Positive terminal alpha is recorded:
+noise moments and Gaussian-only sampling do not prove density correctness.
+
+The one-terminal `terminal_round` helper allocates a uniquely owned ordinary
+T4 only when invoked. The user consents directly through terminal drivemount;
+consent is bounded to five minutes. Input archives are read-only from the
+already verified Drive backup, hashed before selective streaming extraction.
+An isolated environment runs C2/B2 checkpoint diagnostics, then four B3
+screenings of at most 1,000 updates each. B3-T changes either CX or palette,
+chosen from the control's TRAIN step-20 head gradients before seeing validation
+results. This static perturbation is a project experiment, not GradNorm or a
+validated histology prescription. Native review is required before choosing a
+seed confirmation or C3 intervention; this helper starts neither automatically.
+
+The worker and controller reserve transfer time inside a 150-minute total T4
+ceiling. Results retain code, native predictions, checkpoint/optimizer/RNG,
+metrics, pinned backbone source/licenses and environment identities. SHA-checked
+Drive publication and DriveFS flush precede success; output parts are verified
+locally, logs are collected on success/failure and only the owned runtime is
+stopped. Reinvocation reuses verified evidence; a failed cleanup retries the
+same owned session without retraining. No main training or new account choice
+is authorized by this helper. The project user will supply two main-training
+accounts when a suitable final protocol is ready.
+
+Tests for this workflow include real fixture PNG→train→checkpoint→diagnostic
+loops, nonmutating gradient probes, all-validation coverage, a Gaussian-score
+solver control, deterministic bundle creation, archive→parts integrity, and a
+fake CLI boundary for consent failure/cleanup/idempotence. Fake CLI tests do
+not establish real OAuth, GPU, DriveFS or histology performance.
