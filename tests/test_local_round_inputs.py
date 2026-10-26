@@ -12,6 +12,17 @@ from tools.nonaligned_stain import inputs, data
 
 
 class LocalRoundInputsTests(unittest.TestCase):
+    def test_training_phase_transports_only_unchanged_dataset_without_unused_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture(root/'dataset')
+            cfg = inputs.pack(root/'dataset', {}, root/'transport', required_checkpoints=())
+            self.assertEqual(cfg['required_checkpoints'], [])
+            self.assertFalse(any(name.endswith('.pt') for name in cfg['input_files']))
+            dataset = inputs.stage(root/'transport', cfg)
+            self.assertEqual(len(data.validate(dataset)['records']), 6)
+            self.assertEqual(data.sha256(dataset/'manifest.json'), data.sha256(root/'dataset/manifest.json'))
+
     def test_original_file_transport_and_deterministic_bundle(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

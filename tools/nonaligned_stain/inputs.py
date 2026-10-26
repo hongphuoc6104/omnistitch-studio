@@ -18,14 +18,14 @@ def digest(path):
     return h.hexdigest()
 
 
-def pack(dataset, checkpoints, destination):
+def pack(dataset, checkpoints, destination, *, required_checkpoints=('B2', 'C2'), require_same_patient_style=True):
     from tools.nonaligned_stain import data
     dataset, destination = Path(dataset), Path(destination)
-    doc = data.validate(dataset, require_same_patient_style=True)
+    doc = data.validate(dataset, require_same_patient_style=require_same_patient_style)
     files = {'dataset/manifest.json': dataset/'manifest.json'}
     files.update({'dataset/'+r['file']: data.contained(dataset, r['file']) for r in doc['records']})
-    if set(checkpoints) != {'B2', 'C2'}:
-        raise ValueError('Both trusted diagnostic checkpoints are required')
+    if not set(required_checkpoints) <= {'B2', 'C2'} or set(checkpoints) != set(required_checkpoints):
+        raise ValueError('Explicit trusted diagnostic checkpoints do not match this phase')
     for branch, item in checkpoints.items():
         path = Path(item['path'])
         if digest(path) != item['sha256']:
@@ -51,7 +51,8 @@ def pack(dataset, checkpoints, destination):
             parts.append({'name': name, 'bytes': len(block), 'sha256': hashlib.sha256(block).hexdigest()})
     return {'input_transport': 'local_parts', 'allow_local_verified_completion': True,
             'inputs_sha256': digest(archive), 'inputs_bytes': archive.stat().st_size,
-            'input_files': manifest, 'input_parts': parts, 'dataset_sha256': digest(dataset/'manifest.json')}
+            'input_files': manifest, 'input_parts': parts, 'dataset_sha256': digest(dataset/'manifest.json'),
+            'required_checkpoints': sorted(required_checkpoints)}
 
 
 def verify_parts(root, cfg):
@@ -75,8 +76,10 @@ def stage(root, cfg):
     root = Path(root).resolve()
     verify_parts(root, cfg)
     expected = cfg['input_files']
-    if (not 3 <= len(expected) <= 2051
-            or not {'dataset/manifest.json', 'B2.pt', 'C2.pt'} <= expected.keys()
+    required = cfg.get('required_checkpoints', ['B2', 'C2'])
+    if (not set(required) <= {'B2', 'C2'} or len(set(required)) != len(required)
+            or not 1 <= len(expected) <= 2051
+            or not {'dataset/manifest.json', *(p+'.pt' for p in required)} <= expected.keys()
             or sum(m['bytes'] for m in expected.values()) > 384*1024**2):
         raise ValueError('Invalid local input member manifest')
     archive = root/'received_inputs.tar'
@@ -115,7 +118,7 @@ def stage(root, cfg):
             seen.add(name)
     if seen != expected.keys():
         raise ValueError('Missing local input archive members')
-    for branch in ('B2', 'C2'):
+    for branch in required:
         if digest(destination/(branch+'.pt')) != cfg['archives'][branch]['checkpoint_sha256']:
             raise ValueError('Transport changed a trusted diagnostic checkpoint')
     if digest(destination/'dataset/manifest.json') != cfg['dataset_sha256']:

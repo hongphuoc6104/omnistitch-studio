@@ -188,3 +188,34 @@ after full result SHA/part verification on the local data partition. It records
 The GPU is stopped and any later Drive repair/backup uses a CPU task. Repeated
 invocation reuses the same verified local results instead of retraining. The
 normal Drive-backed mode still requires verified Drive publication.
+
+### Checkpoint receipts and phase-sized runtimes
+
+A real runtime disappeared during the second B3 screening before the final
+archive. The latest new weights were still VM-local and were lost; retained
+metadata/preview images are not a complete checkpoint archive. Its cause is
+unknown. Do not present this event as a proven idle-timeout or authentication
+failure.
+
+`train` now atomically publishes checkpoint step/size/SHA metadata after each
+checkpoint replacement. The worker streams the matching immutable inode plus
+bounded loss/probe provenance into a publication. The host verifies every part,
+records a durable local receipt, then ACKs it. No `.grad`, optimizer or RNG is
+changed by publication. A model phase cannot finish without a final checkpoint
+receipt. Host polling checks assignments after three transport misses and exits
+on confirmed runtime loss instead of waiting the entire GPU budget.
+
+`phases` can explicitly select one bounded diagnostic or B3 configuration per
+runtime. Inputs may declare only the diagnostic checkpoints needed for that
+phase (none for a fresh B3 model), keeping native crop bytes and patient splits
+unchanged. The control's verified TRAIN gradient probe can be supplied to the
+separate B3-T phase; its SHA and source archive provenance are recorded. A
+phase-specific `resume_training` may use a verified B2-architecture checkpoint;
+the existing strict data/code/objective/seed/RNG contract still applies. A
+completed 1,000-step checkpoint needs evaluation only, not more optimizer steps.
+
+Tests include an actual fixture PNG→model→checkpoint→publication→host receipt,
+source VM deletion and exact resumed-vs-continuous CPU weights, plus corrupted
+part/sidecar rejection and early exit on missing assignments. These do not
+prove a future Colab runtime will persist. No artificial keepalive or provider
+limit evasion is used. Main training remains separately authorized.

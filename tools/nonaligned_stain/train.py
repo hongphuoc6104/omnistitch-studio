@@ -177,7 +177,12 @@ def train(args):
                     'optimizers': {n: m.state_dict() for n, m in optimizers.items()},
                     'scalers': {n: m.state_dict() for n, m in scalers.items()},
                     'ema': {n: m.state_dict() for n, m in ema.items()}, 'rng': rng_state(torch)}, temporary)
+        meta = {'step': step, 'sha256': data.sha256(temporary), 'bytes': temporary.stat().st_size,
+                'dataset_sha256': identity['dataset_sha256']}
         temporary.replace(output/'checkpoint.pt')
+        sidecar = output/'checkpoint_meta.tmp'
+        sidecar.write_text(json.dumps(meta, indent=2)+'\n')
+        sidecar.replace(output/'checkpoint_meta.json')
 
     def evaluate(label, full=False):
         before_rng = rng_state(torch)

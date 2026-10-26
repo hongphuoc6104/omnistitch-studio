@@ -7,6 +7,7 @@ No main training, seed selection or long continuation is performed here.
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -16,6 +17,16 @@ import subprocess
 import sys
 import tarfile
 import time
+
+PHASES = ('C2_diagnostic', 'B2_diagnostic', 'B3-0', 'B3-S', 'B3-I', 'B3-T')
+
+
+def selected_phases(cfg):
+    selected = cfg.get('phases', list(PHASES))
+    if (not isinstance(selected, list) or not 1 <= len(selected) <= len(PHASES)
+            or len(set(selected)) != len(selected) or not set(selected) <= set(PHASES)):
+        raise ValueError('Invalid bounded screening phase selection')
+    return [p for p in PHASES if p in selected]
 
 
 def digest(path):
@@ -130,6 +141,7 @@ def run(root):
     cfg = json.loads((root/'config.json').read_text())
     if cfg.get('main_training') is not False or not 1 <= cfg['max_seconds'] <= 9000:
         raise ValueError('This worker permits bounded screening only')
+    phases = selected_phases(cfg)
     output = root/'results'
     output.mkdir(exist_ok=False)
     deadline = time.time()+cfg['remaining_seconds']
@@ -151,13 +163,48 @@ def run(root):
             raise TimeoutError('Insufficient reserved job/evidence time')
         command = [str(python), '-u', '-m', module, *map(str, args)]
         child = subprocess.Popen(command, cwd=root/'code', start_new_session=True)
+        training = module == 'tools.nonaligned_stain.train'
+        phase = Path(args[args.index('--output')+1]).name if training else None
+        last_checkpoint = None
+        latest = None
+        def publish_checkpoint():
+            nonlocal last_checkpoint, latest
+            if not training:
+                return
+            meta_path = root/'results'/phase/'checkpoint_meta.json'
+            if not meta_path.is_file():
+                return
+            metadata = json.loads(meta_path.read_text())
+            if metadata['sha256'] == last_checkpoint:
+                return
+            from tools.nonaligned_stain import delivery
+            publication = delivery.snapshot(root, phase)
+            if publication is not None:
+                latest = publication
+                last_checkpoint = publication['checkpoint_sha256']
+                progress('training_'+phase, publication=publication)
         try:
-            child.wait(timeout=seconds+60)
+            child_end = time.monotonic()+seconds+60
+            while child.poll() is None:
+                publish_checkpoint()
+                if time.monotonic() >= child_end:
+                    raise subprocess.TimeoutExpired(command, seconds+60)
+                time.sleep(1)
         except subprocess.TimeoutExpired:
             stop_child(child)
             raise
         if child.returncode:
             raise RuntimeError('Research child failed: '+module+' exit '+str(child.returncode))
+        if training:
+            publish_checkpoint()
+            if latest is None:
+                raise ValueError('No verified final checkpoint publication')
+            ack = root/('checkpoint_ack_'+latest['id'])
+            ack_end = min(deadline, time.time()+90)
+            while not ack.is_file() and time.time() < ack_end:
+                time.sleep(1)
+            if not ack.is_file() or json.loads(ack.read_text()).get('archive_sha256') != latest['archive_sha256']:
+                raise RuntimeError('Final checkpoint lacks a verified host receipt')
 
     try:
         sys.path.insert(0, str(root/'code'))
@@ -183,7 +230,7 @@ def run(root):
         if digest(dataset/'manifest.json') != cfg['dataset_sha256']:
             raise ValueError('Extracted dataset identity mismatch')
         from tools.nonaligned_stain.data import validate
-        validate(dataset, require_same_patient_style=True)
+        doc = validate(dataset, require_same_patient_style=any(p.startswith('B3-') for p in phases))
         progress('isolated_environment')
         child = subprocess.Popen([sys.executable, '-u', '-m', 'tools.paired_stain.bootstrap_colab',
                                   '--root', str(root/'environment')], cwd=root/'code', start_new_session=True)
@@ -192,12 +239,20 @@ def run(root):
             raise RuntimeError('Isolated bootstrap failed')
         python = root/'environment/env/bin/python'
         for branch in ('B', 'C'):
+            if branch == 'C' and 'C2_diagnostic' not in phases:
+                continue
+            if branch == 'B' and not any(p == 'B2_diagnostic' or p.startswith('B3-') for p in phases):
+                continue
             progress('public_assets_'+branch)
             call('tools.paired_stain.prepare', 'assets', '--branch', branch,
                  '--assets', root/'assets', *(['--vae-cache', root/'vae'] if branch == 'C' else []), seconds=600)
         for branch in ('C2', 'B2'):
+            if branch+'_diagnostic' not in phases:
+                continue
             progress('diagnostic_'+branch)
-            seconds = 1200 if branch == 'C2' else 600
+            seconds = cfg.get('diagnostic_seconds', {}).get(branch+'_diagnostic', 1200 if branch == 'C2' else 600)
+            if type(seconds) is not int or not 60 <= seconds <= 1200:
+                raise ValueError('Invalid diagnostic sub-budget')
             call('tools.nonaligned_stain.diagnose', '--dataset', dataset, '--checkpoint', root/'inputs'/(branch+'.pt'),
                  '--checkpoint-sha256', cfg['archives'][branch]['checkpoint_sha256'], '--branch', branch,
                  '--assets', root/'assets', '--vae-cache', root/'vae', '--output', output/(branch+'_diagnostic'),
@@ -207,25 +262,58 @@ def run(root):
                        ('B3-I', dict(defaults, same_HE_identity=.5))]
         reports = []
         for index in range(4):
+            name = ('B3-0', 'B3-S', 'B3-I', 'B3-T')[index]
+            if name not in phases:
+                continue
             if index == 3:
-                probe = json.loads((output/'B3-0/gradient_0020.json').read_text())
+                probe_path = output/'B3-0/gradient_0020.json'
+                prior = None
+                if probe_path.is_file():
+                    probe = json.loads(probe_path.read_text())
+                else:
+                    prior = cfg['prior_control_probe']
+                    raw = prior['json'].encode()
+                    if hashlib.sha256(raw).hexdigest() != prior['sha256'] or not re.fullmatch('[0-9a-f]{64}', prior['phase_archive_sha256']):
+                        raise ValueError('Unverified prior TRAIN control probe')
+                    probe = json.loads(prior['json'])
+                    train = {r['file']: r for r in doc['records'] if r['split'] == 'train'}
+                    if (probe['step'] != 20 or probe['inputs_are_TRAIN'] is not True
+                            or probe['source_file'] not in train or train[probe['source_file']]['domain'] != 'THO'
+                            or probe['style_file'] not in train or train[probe['style_file']]['domain'] != 'HE'
+                            or train[probe['source_file']]['patient_id'] != train[probe['style_file']]['patient_id']):
+                        raise ValueError('Prior gradient probe is not a valid TRAIN association')
+                    (output/'B3-T_control_probe.json').write_text(prior['json'])
                 norm = lambda key: probe['terms'][key]['weighted_gradient_norm']['residual_head']
+                if any(not math.isfinite(norm(k)) or norm(k) < 0 or probe['terms'][k]['weight'] != defaults[k] for k in defaults):
+                    raise ValueError('Invalid control gradient norms/coefficients')
                 target = 'CX' if norm('CX') <= norm('palette') else 'palette'
                 decision = {'selected_term': target, 'source': 'TRAIN step20 residual-head gradient',
                             'CX_weighted_norm': norm('CX'), 'palette_weighted_norm': norm('palette'),
-                            'validation_used_for_choice': False}
+                            'validation_used_for_choice': False,
+                            'prior_phase_archive_sha256': prior['phase_archive_sha256'] if prior else None}
                 (output/'B3-T_decision.json').write_text(json.dumps(decision, indent=2)+'\n')
-                experiments.append(('B3-T', dict(defaults, **{target: defaults[target]*5})))
-            name, weights = experiments[index]
+                weights = dict(defaults, **{target: defaults[target]*5})
+            else:
+                name, weights = experiments[index]
             progress('training_'+name)
+            resume = cfg.get('resume_training')
+            resume_args = []
+            if resume:
+                if (len([p for p in phases if p.startswith('B3-')]) != 1 or resume['phase'] != name
+                        or resume['checkpoint_label'] != 'B2'
+                        or not re.fullmatch('[0-9a-f]{64}', resume['receipt_sha256'])):
+                    raise ValueError('Invalid phase-specific checkpoint resume')
+                resume_args = ['--resume', root/'inputs/B2.pt']
             call('tools.nonaligned_stain.train', '--dataset', dataset, '--assets', root/'assets',
                  '--output', output/name, '--branch', 'B2', '--steps', '1000', '--seconds', '900', '--seed', '2026',
                  '--loss-weights', json.dumps(weights), '--gradient-diagnostics', '--eval-all',
-                 '--compact-evaluation', seconds=900)
+                 '--compact-evaluation', *resume_args, seconds=900)
             report = json.loads((output/name/'run.json').read_text())
-            if (not report['completed'] or report['updates_this_run'] < 20
+            if (not report['completed'] or report['final_step'] != 1000 or report['updates_this_run'] < 1
                     or report['final_validation_predictions'] != 81):
-                raise ValueError('Missing complete B3 validation: '+name)
+                raise ValueError('Partial B3 phase; use retained checkpoint receipt to resume: '+name)
+            if resume:
+                (output/name/'resume_parent.json').write_text(json.dumps(resume, indent=2)+'\n')
             reports.append({'name': name, 'updates': report['updates_this_run'], 'weights': weights,
                             'validation_predictions': report['final_validation_predictions'],
                             'wall_seconds': report['wall_seconds'], 'seed': 2026})

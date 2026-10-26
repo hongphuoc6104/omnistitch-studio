@@ -24,7 +24,7 @@ from tools.colab_fetch import Runner, digest, scrub
 CODE_FILES = tuple('tools/paired_stain/'+n for n in
                    ('data.py', 'models.py', 'train.py', 'prepare.py', 'bootstrap_colab.py', 'requirements.txt')) + tuple(
                        'tools/nonaligned_stain/'+n for n in
-                       ('data.py', 'objectives.py', 'bridge.py', 'train.py', 'diagnose.py', 'round_worker.py', 'inputs.py'))
+                       ('data.py', 'objectives.py', 'bridge.py', 'train.py', 'diagnose.py', 'round_worker.py', 'inputs.py', 'delivery.py'))
 
 
 def bundle_code(repo, destination):
@@ -63,6 +63,12 @@ def run(config_path, *, runner=None, interval=5):
     mode = cfg.get('input_transport', 'drive')
     if mode not in ('drive', 'local_parts'):
         raise ValueError('Unknown screening input transport')
+    from tools.nonaligned_stain.round_worker import selected_phases
+    selected_phases(cfg)
+    reserve = cfg.get('transfer_reserve_seconds', 1800)
+    minimum = cfg.get('minimum_work_seconds', 2700)
+    if type(reserve) is not int or not 120 <= reserve <= 1800 or type(minimum) is not int or not 600 <= minimum <= 2700:
+        raise ValueError('Invalid per-phase time reserve')
     local_allowed = mode == 'local_parts' and cfg.get('allow_local_verified_completion') is True
     if mode == 'local_parts':
         if not local_allowed:
@@ -190,8 +196,8 @@ def run(config_path, *, runner=None, interval=5):
                         runner.call(profile, ['upload', str(base/part['name']), remote+'/'+part['name'], '--session', name])
                         state['input_parts_uploaded'] = i+1
                         persist()
-                cfg = dict(cfg, job_id=name, remaining_seconds=max(1, int(end-time.monotonic()-1800)))
-                if cfg['remaining_seconds'] < 2700:
+                cfg = dict(cfg, job_id=name, remaining_seconds=max(1, int(end-time.monotonic()-reserve)))
+                if cfg['remaining_seconds'] < minimum:
                     raise TimeoutError('Insufficient screening and transfer budget after consent')
                 remote_cfg = temp/'config.json'
                 remote_cfg.write_text(json.dumps(cfg, indent=2)+'\n')
@@ -222,15 +228,32 @@ print('ROUND2_WORKER_STARTED',child.pid)
                 state['launched'] = True
                 persist()
                 last = None
+                missing_polls = 0
+                delivered = set()
                 while time.monotonic() < end:
                     path = attempt/'progress.json'
                     rc, _ = runner.call(profile, ['download', remote+'/progress.json', str(path), '--session', name], required=False)
                     if rc == 0:
+                        missing_polls = 0
                         progress = json.loads(path.read_text())
                         stage = progress['stage']
+                        state['stage'] = stage
                         if stage != last:
                             print('ROUND2_PROGRESS', stage, flush=True)
                             last = stage
+                        publication = progress.get('publication')
+                        if publication and publication['id'] not in delivered:
+                            from tools.nonaligned_stain import delivery
+                            def fetch(part_name, target):
+                                runner.call(profile, ['download', remote+'/'+part_name, str(target), '--session', name])
+                            receipt = delivery.receive(publication, base, fetch)
+                            state.setdefault('latest_checkpoints', {})[publication['phase']] = receipt
+                            persist()  # Receipt is durable before acknowledging the producer.
+                            ack = temp/'checkpoint_ack.json'
+                            ack.write_text(json.dumps(receipt)+'\n')
+                            runner.call(profile, ['upload', str(ack), remote+'/checkpoint_ack_'+publication['id'], '--session', name])
+                            delivered.add(publication['id'])
+                            print('CHECKPOINT_RECEIVED', publication['phase'], publication['step'], flush=True)
                         if stage in ('completed', 'failed'):
                             state.update(progress)
                             if progress.get('parts'):
@@ -246,6 +269,14 @@ print('ROUND2_WORKER_STARTED',child.pid)
                                 state['stage'] = 'completed_local_Drive_pending'
                             persist()
                             break
+                        persist()
+                    else:
+                        missing_polls += 1
+                        if missing_polls >= 3:
+                            _, assignments = runner.call(profile, ['sessions'], required=False)
+                            if 'No active sessions found' in assignments:
+                                state['runtime_missing_verified'] = True
+                                raise RuntimeError('Owned runtime no longer assigned; retained checkpoint receipts are available')
                     time.sleep(interval)
                 else:
                     raise TimeoutError('Owned T4 total deadline')
