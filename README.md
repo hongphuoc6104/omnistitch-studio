@@ -26,6 +26,10 @@
 
 ## 🎯 Workflow Scope
 
+For research dataset preparation, the opt-in [bounded native-focus mosaic API](docs/DATASET_MOSAIC.md)
+exports registered camera frames with source-ownership, coverage and seam maps.
+It selects native captured detail and keeps the existing Studio blender unchanged.
+
 **OmniStitch Studio** targets approximately planar image sets such as microscope-stage scans. It can also load other overlapping planar images, but it does not implement photogrammetric reconstruction, georeferencing, orthorectification, semantic cloud detection, or clinical image-quality assessment.
 
 The Clarity Inspector ranks co-registered candidates by an alpha-weighted variance of the grayscale Laplacian. The score is a texture sharpness cue, not an automatic biological-quality or cloud-free classification. Users review candidates before applying a local replacement.
@@ -203,3 +207,34 @@ Please check our community guidelines and policies:
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
 Copyright (c) 2026 **Tien-Phat Nguyen (HalogenBr)**.
 Researchers and developers may use, modify, and distribute this software under the MIT License. The software is not validated as a medical device or diagnostic system.
+
+Experimental fixed-owner illumination comparison helpers (separate from Studio): [pilot mathematics and limits](tools/photometry_pilot/README.md).
+
+P3 fixed-owner exposure derivatives and float TIFF reading: [format and safeguards](docs/DATASET_EXPOSURE.md).
+
+Serial-section THO/H&E candidate pairing, native coordinate inspection and
+streamed review derivatives: [contracts and limitations](docs/SERIAL_PAIRING.md).
+Letter suffixes are never treated as pair identities; global and crossed
+assignment hypotheses remain pending anatomical review before paired training.
+Separate backward residual fields can be reviewed on bounded native ROIs with
+one original H&E sampling; fields and sampled Jacobians do not establish pair identity.
+
+Interactive CPU Colab Drive file retrieval with immediate mount-to-fetch,
+verified transfers and owned-runtime cleanup: [terminal workflow](docs/COLAB_FETCH.md).
+
+## Bounded native search windows
+
+The [Colab native collector](docs/COLAB_NATIVE.md) extracts lossless RGB/capture
+windows from checksummed original mosaics on CPU, keeps full native coordinates,
+and returns only the requested regions for review. Search windows do not imply
+anatomical correspondence or training acceptance.
+
+Two guarded paired-stain research pilots (scale-1 SwinIR and a small conditional
+latent DiT), explicit release/codec gates, checkpoint resume and CPU E2E:
+[paired 4X readiness](tools/paired_stain/README.md). Candidate images do not
+become positive pairs merely because the training code is available.
+
+Separate [nonaligned research pilots](tools/nonaligned_stain/README.md) use
+original sensor crops with contextual SwinIR and independently trained DiT
+domain bridges. They retain explicit unpaired semantics, native-source
+provenance and same-image codec/solver controls.

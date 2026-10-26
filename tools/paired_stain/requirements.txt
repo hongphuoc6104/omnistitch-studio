@@ -1,0 +1,9 @@
+# Research environment, deliberately separate from the stitching application.
+# Colab provides CUDA torch/torchvision; record their installed versions in run.json.
+# CPU E2E reference: Python 3.12, torch 2.5.1+cpu, torchvision 0.20.1+cpu.
+numpy==2.2.6
+Pillow==12.3.0
+timm==0.9.16
+diffusers==0.35.1
+huggingface-hub==0.34.4
+safetensors==0.6.2

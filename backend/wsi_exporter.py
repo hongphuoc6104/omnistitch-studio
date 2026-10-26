@@ -4,6 +4,7 @@
 
 import os
 import math
+import mmap
 import cv2
 import numpy as np
 import tifffile
@@ -225,8 +226,16 @@ def _publish_staged_artifacts(stage_root, publications):
             raise
 
 
-def write_tiled_tiff(array, file_path, tile_size=512, is_mask=False):
-    """Stream an array-like object to tiled TIFF/BigTIFF one padded tile at a time."""
+def _reclaim_memmap_pages(array):
+    """Flush/reclaim resident mapped pages when the operating system supports it."""
+    if isinstance(array, np.memmap):
+        array.flush()
+        if hasattr(array._mmap, 'madvise') and hasattr(mmap, 'MADV_DONTNEED'):
+            array._mmap.madvise(mmap.MADV_DONTNEED)
+
+
+def write_tiled_tiff(array, file_path, tile_size=512, is_mask=False, release_pages=False):
+    """Stream tiles preserving dtype, including uint32 source-ownership maps."""
     height, width = array.shape[:2]
     channels = 1 if array.ndim == 2 else array.shape[2]
     tile_size = max(16, int(math.ceil(tile_size / 16.0)) * 16)
@@ -235,22 +244,30 @@ def write_tiled_tiff(array, file_path, tile_size=512, is_mask=False):
         for y in range(0, height, tile_size):
             for x in range(0, width, tile_size):
                 tile_shape = (tile_size, tile_size) if channels == 1 else (tile_size, tile_size, channels)
-                tile = np.zeros(tile_shape, dtype=np.uint8)
+                tile = np.zeros(tile_shape, dtype=array.dtype)
                 source = array[y:min(y + tile_size, height), x:min(x + tile_size, width)]
                 tile[:source.shape[0], :source.shape[1]] = source
                 yield tile
+            if release_pages:
+                _reclaim_memmap_pages(array)
 
     kwargs = {
         "shape": (height, width) if channels == 1 else (height, width, channels),
-        "dtype": np.uint8,
+        "dtype": array.dtype,
         "tile": (tile_size, tile_size),
         "photometric": 'minisblack' if is_mask else 'rgb',
         "metadata": None,
     }
     if channels == 4:
         kwargs["extrasamples"] = ['unassalpha']
-    with tifffile.TiffWriter(file_path, bigtiff=True) as writer:
-        writer.write(tiles(), **kwargs)
+    try:
+        with tifffile.TiffWriter(file_path, bigtiff=True) as writer:
+            writer.write(tiles(), **kwargs)
+    finally:
+        # TIFF writers may consume exactly N tiles without exhausting the
+        # generator, so reclamation after its final yield is not sufficient.
+        if release_pages:
+            _reclaim_memmap_pages(array)
 
 
 def generate_dzi_pyramid_bounded(
