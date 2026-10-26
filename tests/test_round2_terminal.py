@@ -15,9 +15,10 @@ from tools.nonaligned_stain.round_worker import extract_selected, archive_result
 
 
 class FakeRunner:
-    def __init__(self, *, fail_mount=False, fail_first_stop=False):
+    def __init__(self, *, fail_mount=False, fail_first_stop=False, drive_verified=True):
         self.calls, self.fail_mount, self.fail_first_stop = [], fail_mount, fail_first_stop
         self.payload = b'fixture-verified-archive'
+        self.drive_verified = drive_verified
 
     def call(self, profile, args, *, interactive=False, required=True):
         self.calls.append(args)
@@ -42,7 +43,7 @@ class FakeRunner:
             if args[1].endswith('/progress.json'):
                 sha = hashlib.sha256(self.payload).hexdigest()
                 path.write_text(json.dumps({'stage': 'completed', 'completed': True,
-                    'Drive_backup_verified': True, 'archive_sha256': sha, 'archive_bytes': len(self.payload),
+                    'Drive_backup_verified': self.drive_verified, 'archive_sha256': sha, 'archive_bytes': len(self.payload),
                     'parts': [{'name': 'result_part_000', 'bytes': len(self.payload), 'sha256': sha}]}))
             else:
                 path.write_bytes(self.payload)
@@ -184,6 +185,27 @@ class RoundTerminalTests(unittest.TestCase):
         self.assertIn('PermissionError', result['Drive_error'])
         self.assertEqual(result['archive_sha256'], digest(root/'round2.tar.gz'))
         self.assertEqual(sum(p['bytes'] for p in result['parts']), result['archive_bytes'])
+
+    def test_verified_local_input_mode_never_mounts_and_records_pending_Drive(self):
+        cfg = json.loads(self.config.read_text())
+        content = b'fixture input archive'
+        part = self.root/'input_part_000'
+        part.write_bytes(content)
+        sha = hashlib.sha256(content).hexdigest()
+        cfg.update(input_transport='local_parts', allow_local_verified_completion=True,
+                   inputs_sha256=sha, inputs_bytes=len(content),
+                   input_parts=[{'name':part.name,'bytes':len(content),'sha256':sha}])
+        self.config.write_text(json.dumps(cfg))
+        runner = FakeRunner(drive_verified=False)
+        result = run(self.config, runner=runner, interval=0)
+        self.assertTrue(result['completed'])
+        self.assertTrue(result['Drive_backup_pending'])
+        self.assertFalse(result['Drive_backup_verified'])
+        self.assertNotIn('drivemount',[c[0] for c in runner.calls])
+        self.assertTrue(any(c[0]=='upload' and 'input_part_000' in c[2] for c in runner.calls))
+        count = len(runner.calls)
+        run(self.config, runner=runner, interval=0)
+        self.assertEqual(len(runner.calls),count)
 
 
 if __name__ == '__main__':

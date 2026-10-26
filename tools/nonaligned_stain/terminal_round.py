@@ -24,7 +24,7 @@ from tools.colab_fetch import Runner, digest, scrub
 CODE_FILES = tuple('tools/paired_stain/'+n for n in
                    ('data.py', 'models.py', 'train.py', 'prepare.py', 'bootstrap_colab.py', 'requirements.txt')) + tuple(
                        'tools/nonaligned_stain/'+n for n in
-                       ('data.py', 'objectives.py', 'bridge.py', 'train.py', 'diagnose.py', 'round_worker.py'))
+                       ('data.py', 'objectives.py', 'bridge.py', 'train.py', 'diagnose.py', 'round_worker.py', 'inputs.py'))
 
 
 def bundle_code(repo, destination):
@@ -60,6 +60,15 @@ def run(config_path, *, runner=None, interval=5):
             or not re.fullmatch(r'[^\s@]+@[^\s@]+', cfg['email'])
             or digest(base/'code.tar.gz') != cfg['bundle_sha256']):
         raise ValueError('Invalid screening configuration/bundle')
+    mode = cfg.get('input_transport', 'drive')
+    if mode not in ('drive', 'local_parts'):
+        raise ValueError('Unknown screening input transport')
+    local_allowed = mode == 'local_parts' and cfg.get('allow_local_verified_completion') is True
+    if mode == 'local_parts':
+        if not local_allowed:
+            raise ValueError('Local completion must be explicitly configured')
+        from tools.nonaligned_stain.inputs import verify_parts
+        verify_parts(base, cfg)  # Before allocation: no GPU wasted on bad inputs.
     runner = runner or BoundedRunner(timeout=120)
     fingerprint = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
     with (base/'terminal.lock').open('w') as lock:
@@ -82,7 +91,7 @@ def run(config_path, *, runner=None, interval=5):
                 if rc != 0 and not missing:
                     raise RuntimeError('Owned runtime cleanup still unconfirmed; no new allocation')
             archive = base/'round2.tar.gz'
-            if (previous.get('completed') and previous.get('Drive_backup_verified')
+            if (previous.get('completed') and (previous.get('Drive_backup_verified') or local_allowed)
                     and archive.is_file()
                     and digest(archive) == previous.get('archive_sha256')
                     and previous.get('job_fingerprint') == fingerprint):
@@ -97,7 +106,7 @@ def run(config_path, *, runner=None, interval=5):
         attempt.mkdir(parents=True, exist_ok=False)
         state = {'session': name, 'profile': profile, 'email': cfg['email'], 'hardware': 'T4',
                  'main_training': False, 'completed': False, 'bundle_sha256': cfg['bundle_sha256'],
-                 'job_fingerprint': fingerprint}
+                 'job_fingerprint': fingerprint, 'input_transport': mode, 'remote_root': remote}
         created = False
 
         def persist():
@@ -159,21 +168,28 @@ def run(config_path, *, runner=None, interval=5):
                     raise RuntimeError('T4 kernel probe failed')
                 state['kernel_ready'] = True
                 persist()
-                print('colab-profile '+profile+' drivemount --session '+name, flush=True)
-                print('Cap quyen bang '+cfg['email']+'; giu terminal den ROUND2_COMPLETE.', flush=True)
-                runner.call(profile, ['drivemount', '--session', name], interactive=True)
-                mount = temp/'mount.py'
-                sources = {k: {'path': '/content/drive/MyDrive/CTU_P_experiments/20261026_unpaired_4X/collected/'+v['filename'],
-                               'bytes': v['bytes']} for k, v in cfg['archives'].items()}
-                mount.write_text('from pathlib import Path\n'+f'items={sources!r}\n'+
-                                 "assert Path('/content/drive/MyDrive').is_dir()\n"
-                                 "for item in items.values():\n assert Path(item['path']).stat().st_size==item['bytes']\n"
-                                 "print('ROUND2_DRIVE_SOURCES_READY')\n")
-                _, result = runner.call(profile, ['exec', '--session', name, '--file', str(mount), '--timeout', '30'])
-                if 'ROUND2_DRIVE_SOURCES_READY' not in result:
-                    raise RuntimeError('Mounted Drive lacks verified input sources')
-                state['Drive_sources_verified_by_size'] = True
-                persist()
+                if mode == 'drive':
+                    print('colab-profile '+profile+' drivemount --session '+name, flush=True)
+                    print('Cap quyen bang '+cfg['email']+'; giu terminal den ROUND2_COMPLETE.', flush=True)
+                    runner.call(profile, ['drivemount', '--session', name], interactive=True)
+                    mount = temp/'mount.py'
+                    sources = {k: {'path': '/content/drive/MyDrive/CTU_P_experiments/20261026_unpaired_4X/collected/'+v['filename'],
+                                   'bytes': v['bytes']} for k, v in cfg['archives'].items()}
+                    mount.write_text('from pathlib import Path\n'+f'items={sources!r}\n'+
+                                     "assert Path('/content/drive/MyDrive').is_dir()\n"
+                                     "for item in items.values():\n assert Path(item['path']).stat().st_size==item['bytes']\n"
+                                     "print('ROUND2_DRIVE_SOURCES_READY')\n")
+                    _, result = runner.call(profile, ['exec', '--session', name, '--file', str(mount), '--timeout', '30'])
+                    if 'ROUND2_DRIVE_SOURCES_READY' not in result:
+                        raise RuntimeError('Mounted Drive lacks verified input sources')
+                    state['Drive_sources_verified_by_size'] = True
+                    persist()
+                else:
+                    print('ROUND2_INPUT_TRANSPORT verified local parts; no Drive mount requested', flush=True)
+                    for i, part in enumerate(cfg['input_parts']):
+                        runner.call(profile, ['upload', str(base/part['name']), remote+'/'+part['name'], '--session', name])
+                        state['input_parts_uploaded'] = i+1
+                        persist()
                 cfg = dict(cfg, job_id=name, remaining_seconds=max(1, int(end-time.monotonic()-1800)))
                 if cfg['remaining_seconds'] < 2700:
                     raise TimeoutError('Insufficient screening and transfer budget after consent')
@@ -222,8 +238,13 @@ print('ROUND2_WORKER_STARTED',child.pid)
                             persist()
                             if stage == 'failed':
                                 raise RuntimeError(progress.get('error', 'Research worker failed'))
-                            if not progress.get('Drive_backup_verified') or not state.get('local_archive'):
+                            if not state.get('local_archive') or (not progress.get('Drive_backup_verified') and not local_allowed):
                                 raise RuntimeError('Missing durable/local verified results')
+                            state['Drive_backup_pending'] = not progress.get('Drive_backup_verified', False)
+                            state['local_archive_verified'] = True
+                            if state['Drive_backup_pending']:
+                                state['stage'] = 'completed_local_Drive_pending'
+                            persist()
                             break
                     time.sleep(interval)
                 else:
@@ -245,7 +266,7 @@ print('ROUND2_WORKER_STARTED',child.pid)
             persist()
         if state.get('stop_returncode') != 0:
             raise RuntimeError('Results verified but runtime cleanup not confirmed')
-        print('ROUND2_COMPLETE', flush=True)
+        print('ROUND2_LOCAL_COMPLETE_DRIVE_PENDING' if state.get('Drive_backup_pending') else 'ROUND2_COMPLETE', flush=True)
         return state
 
 

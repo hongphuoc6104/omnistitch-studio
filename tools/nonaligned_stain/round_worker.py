@@ -160,20 +160,28 @@ def run(root):
             raise RuntimeError('Research child failed: '+module+' exit '+str(child.returncode))
 
     try:
-        progress('verify_Drive_inputs')
-        source_root = Path('/content/drive/MyDrive/CTU_P_experiments/20261026_unpaired_4X/collected')
-        for branch in ('C2', 'B2'):
-            item = cfg['archives'][branch]
-            source = source_root/item['filename']
-            if source.stat().st_size != item['bytes'] or digest(source) != item['sha256']:
-                raise ValueError('Original Drive archive checksum mismatch: '+branch)
-            extract_selected(source, root/'inputs', branch+'.pt', include_dataset=branch == 'C2')
-            if digest(root/'inputs'/(branch+'.pt')) != item['checkpoint_sha256']:
-                raise ValueError('Extracted checkpoint checksum mismatch')
-        dataset = root/'inputs/dataset'
+        sys.path.insert(0, str(root/'code'))
+        mode = cfg.get('input_transport', 'drive')
+        if mode == 'local_parts':
+            progress('verify_CLI_input_parts')
+            from tools.nonaligned_stain.inputs import stage
+            dataset = stage(root, cfg)
+        elif mode == 'drive':
+            progress('verify_Drive_inputs')
+            source_root = Path('/content/drive/MyDrive/CTU_P_experiments/20261026_unpaired_4X/collected')
+            for branch in ('C2', 'B2'):
+                item = cfg['archives'][branch]
+                source = source_root/item['filename']
+                if source.stat().st_size != item['bytes'] or digest(source) != item['sha256']:
+                    raise ValueError('Original Drive archive checksum mismatch: '+branch)
+                extract_selected(source, root/'inputs', branch+'.pt', include_dataset=branch == 'C2')
+                if digest(root/'inputs'/(branch+'.pt')) != item['checkpoint_sha256']:
+                    raise ValueError('Extracted checkpoint checksum mismatch')
+            dataset = root/'inputs/dataset'
+        else:
+            raise ValueError('Unknown round2 input transport')
         if digest(dataset/'manifest.json') != cfg['dataset_sha256']:
             raise ValueError('Extracted dataset identity mismatch')
-        sys.path.insert(0, str(root/'code'))
         from tools.nonaligned_stain.data import validate
         validate(dataset, require_same_patient_style=True)
         progress('isolated_environment')

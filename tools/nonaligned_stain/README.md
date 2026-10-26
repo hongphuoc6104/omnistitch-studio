@@ -170,3 +170,21 @@ If Drive publication fails after computation, the complete local tar/part
 manifest is retained. The controller still verifies/downloads the evidence and
 stops its GPU, then reports the missing durable backup. Repair the backup with
 a CPU-only task; an existing verified result must not trigger retraining.
+
+### Explicit transport fallback after a DriveFS outage
+
+`input_transport=local_parts` uses unchanged native crops and complete trusted
+checkpoints already verified locally. `inputs.pack` streams a deterministic tar
+and 8 MiB parts; every input part is checked before GPU allocation and every
+member/checkpoint/native manifest is checked on the runtime. No Drive consent
+is requested in this explicitly configured mode. Geometry, pixels, learning
+objectives and patient splits are unchanged. Unrecognized modes, corruption,
+links, traversal and missing members are rejected.
+
+With `allow_local_verified_completion=true`, the controller may finish only
+after full result SHA/part verification on the local data partition. It records
+`Drive_backup_verified=false`, `Drive_backup_pending=true` and prints
+`ROUND2_LOCAL_COMPLETE_DRIVE_PENDING`; this is not durable Drive publication.
+The GPU is stopped and any later Drive repair/backup uses a CPU task. Repeated
+invocation reuses the same verified local results instead of retraining. The
+normal Drive-backed mode still requires verified Drive publication.
